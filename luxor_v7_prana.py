@@ -20,21 +20,38 @@ class LuxorV7PranaSystem:
         self.sidereal_epoch = pd.Timestamp('1900-01-01')
     
     def fetch_real_binance_data(self):
-        """Scarica dati reali Binance BTCUSDT 2017-2026"""
-        try:
-            print("⏳ Downloading BTCUSDT data...")
-            url = "https://www.cryptodatadownload.com/cdd/Binance_BTCUSDT_d.csv"
-            df = pd.read_csv(url)
-            df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date').reset_index(drop=True)
-            df = df[(df['date'] >= '2017-01-01') & (df['date'] <= '2026-01-09')]
-            df = df.dropna()
-            print(f"✅ Downloaded {len(df)} candles")
-            return df
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            return None
+    """Scarica dati reali Binance BTCUSDT 2017-2026"""
+    try:
+        print("⏳ Downloading BTCUSDT data...")
+        url = "https://www.cryptodatadownload.com/cdd/Binance_BTCUSDT_d.csv"
+        df = pd.read_csv(url, skiprows=1)  # Skip header row
+        
+        # Seleziona solo le colonne che servono
+        df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume BTC']]
+        
+        # Rinomina colonne
+        df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+        
+        # Converti date e valori numerici
+        df['date'] = pd.to_datetime(df['date'])
+        df['open'] = pd.to_numeric(df['open'], errors='coerce')
+        df['high'] = pd.to_numeric(df['high'], errors='coerce')
+        df['low'] = pd.to_numeric(df['low'], errors='coerce')
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+        
+        df = df.sort_values('date').reset_index(drop=True)
+        df = df[(df['date'] >= '2017-01-01') & (df['date'] <= '2026-01-09')]
+        df = df.dropna()
+        
+        print(f"✅ Downloaded {len(df)} candles")
+        return df
+    except Exception as e:
+        print(f"❌ Error in fetch_real_binance_data: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
     
     def calculate_law_of_three_four(self, df, lookback=52):
         """Law of 3 & 4: 90°, 120°, 240° angles"""
