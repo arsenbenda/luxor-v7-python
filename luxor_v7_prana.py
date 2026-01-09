@@ -50,7 +50,7 @@ class LuxorV7PranaSystem:
         import traceback
         traceback.print_exc()
         return None
-                return df
+            return df
 
     
     def calculate_law_of_three_four(self, df, lookback=52):
