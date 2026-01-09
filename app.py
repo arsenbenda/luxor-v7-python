@@ -9,6 +9,7 @@ import requests
 from luxor_v7_prana import LuxorV7PranaSystem
 import uvicorn
 from config import *
+import traceback
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
@@ -22,41 +23,70 @@ luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 async def get_daily_signal():
     """Generate daily LUXOR V7 signal"""
     try:
+        print("\n🔄 Starting /signal/daily endpoint...")
+        
+        # Step 1: Fetch data
+        print("📥 Fetching data...")
         df = luxor.fetch_real_binance_data()
         
         if df is None or len(df) < 100:
+            print("❌ Data fetch failed or insufficient")
             raise HTTPException(status_code=400, detail="Insufficient data")
         
+        print(f"✅ Data fetched: {len(df)} candles")
+        
+        # Step 2: Calculate indicators
+        print("📊 Calculating indicators...")
         df = luxor.calculate_all_indicators(df)
+        print("✅ Indicators calculated")
+        
+        # Step 3: Evaluate signals
+        print("🎯 Evaluating signals...")
         signal = luxor.evaluate_signals(df, len(df) - 1)
+        print(f"✅ Signal evaluated: {signal['action']}")
         
+        # Step 4: Get last row
+        print("📈 Preparing output...")
         row = df.iloc[-1]
-        entry = row['close']
-        sl = entry - (row['atr'] * 0.5)
-        tp = entry + (row['atr'] * 4.5)
         
-        return {
+        # Entry/Exit
+        entry = float(row['close'])
+        atr_val = float(row.get('atr', 100))
+        sl = entry - (atr_val * 0.5)
+        tp = entry + (atr_val * 4.5)
+        
+        print(f"   Entry: {entry}")
+        print(f"   SL: {sl}")
+        print(f"   TP: {tp}")
+        
+        # Step 5: Build response
+        response_data = {
             'status': 'success',
             'timestamp': datetime.now().isoformat(),
-            'signal_type': signal['action'],
-            'entry_price': float(entry),
-            'stop_loss': float(sl),
-            'take_profit': float(tp),
-            'confidence': min(100, signal['signal_count'] * 12),
-            'signal_count': signal['signal_count'],
-            'signals': signal['signals'],
-            'rsi': float(row['rsi']),
-            'atr': float(row['atr']),
-            'cycle_power': float(row['cycle_power']),
-            'nakshatra': int(row['nakshatra']),
-            'near_pivot': int(row['near_pivot']),
-            'algol_safe': int(row['algol_safe']),
+            'signal_type': signal.get('action', 'WAIT'),
+            'entry_price': entry,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'confidence': min(100, signal.get('signal_count', 0) * 15),
+            'signal_count': signal.get('signal_count', 0),
+            'signals': signal.get('signals', []),
+            'rsi': signal.get('rsi', 50),
+            'atr': atr_val,
             'last_date': str(row['date'].date()),
             'candles_analyzed': len(df)
         }
+        
+        print(f"✅ Response ready: {response_data['signal_type']}")
+        return response_data
+    
+    except HTTPException as he:
+        print(f"❌ HTTP Error: {he.detail}")
+        raise he
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Error in /signal/daily: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/backtest/optimize")
 async def backtest_optimize():
@@ -76,10 +106,12 @@ async def backtest_optimize():
         }
     
     except Exception as e:
+        print(f"❌ Error in /backtest/optimize: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health():
+    """Health check"""
     return {
         'status': 'healthy',
         'service': SERVICE_NAME,
