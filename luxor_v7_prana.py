@@ -141,14 +141,18 @@ class LuxorV7PranaSystem:
             return df
     
     def evaluate_signals_optimized(self, df, idx):
-        """Logica segnale MIGLIORATA"""
+        """Logica segnale MIGLIORATA e PIÙ AGGRESSIVA"""
         try:
             if idx < 100:
                 return {
                     'action': 'WAIT',
                     'signal_count': 0,
                     'signals': [],
-                    'strength': 0
+                    'strength': 0,
+                    'confidence': 0,
+                    'rsi': 50.0,
+                    'macd': 0.0,
+                    'volume_ratio': 1.0
                 }
             
             row = df.iloc[idx]
@@ -169,13 +173,19 @@ class LuxorV7PranaSystem:
                 strength += 3
             elif row['rsi'] < 40:
                 signals.append('RSI_WEAK')
+                strength += 2
+            elif row['rsi'] < 50:
+                signals.append('RSI_MILD_DOWN')
                 strength += 1
             
             if row['rsi'] > 70:
                 signals.append('RSI_OVERBOUGHT')
-                strength += 2  # For shorts
+                strength += 3
             elif row['rsi'] > 60:
                 signals.append('RSI_STRONG')
+                strength += 2
+            elif row['rsi'] > 50:
+                signals.append('RSI_MILD_UP')
                 strength += 1
             
             # 3. MACD bullish
@@ -184,17 +194,23 @@ class LuxorV7PranaSystem:
                 strength += 2
             elif row['macd'] < row['macd_signal'] and row['macd_hist'] < 0:
                 signals.append('MACD_BEARISH')
-                strength += 1
+                strength += 2
             
             # 4. Ichimoku cloud
             if close > row['senkou_a'] and close > row['senkou_b']:
                 signals.append('ICHIMOKU_BULL')
                 strength += 2
+            elif close < row['senkou_a'] and close < row['senkou_b']:
+                signals.append('ICHIMOKU_BEAR')
+                strength += 1
             
             # 5. Price support/resistance
             if close > row['pivot_50']:
                 signals.append('ABOVE_PIVOT')
                 strength += 1
+            else:
+                signals.append('BELOW_PIVOT')
+                strength += 0
             
             # 6. Volume confirmation
             if row['volume_ratio'] > 1.3:
@@ -206,29 +222,42 @@ class LuxorV7PranaSystem:
                 signals.append('GANN_CYCLE')
                 strength += 1
             
-            # ===== DECISION LOGIC =====
+            # ===== DECISION LOGIC (IMPROVED & AGGRESSIVE) =====
             
             action = 'WAIT'
+            confidence = 0
             
-            # BUY signal
-            if (row['rsi'] < 35 and row['above_sma200'] == 1 and 
-                row['macd'] > row['macd_signal'] and row['volume_ratio'] > 1.2):
+            # BUY conditions (meno rigido, più realista)
+            if (row['rsi'] < 40 and row['above_sma200'] == 1 and row['macd'] > row['macd_signal']):
                 action = 'BUY'
-            elif (row['rsi'] < 30 and row['above_sma200'] == 1 and strength >= 5):
+                confidence = 85
+            elif (row['rsi'] < 50 and row['above_sma200'] == 1 and row['macd'] > row['macd_signal'] and row['volume_ratio'] > 1.1):
                 action = 'BUY'
+                confidence = 70
+            elif (row['rsi'] < 60 and row['above_sma200'] == 1 and len(signals) >= 4 and row['macd'] > row['macd_signal']):
+                action = 'BUY'
+                confidence = 60
+            elif (row['rsi'] > 50 and row['rsi'] < 70 and row['above_sma200'] == 1 and row['macd'] > row['macd_signal'] and row['volume_ratio'] > 1.2):
+                action = 'BUY'  # Trend continuation
+                confidence = 55
             
-            # SELL signal
-            if (row['rsi'] > 75 and row['above_sma200'] == 0 and 
-                row['macd'] < row['macd_signal'] and strength >= 4):
+            # SELL conditions
+            if (row['rsi'] > 70 and row['above_sma200'] == 0 and row['macd'] < row['macd_signal']):
                 action = 'SELL'
-            elif (row['rsi'] > 70 and row['macd'] < row['macd_signal']):
+                confidence = 80
+            elif (row['rsi'] > 65 and row['macd'] < row['macd_signal'] and row['macd_hist'] < 0):
                 action = 'SELL'
+                confidence = 65
+            elif (row['rsi'] > 60 and row['above_sma200'] == 0 and len(signals) >= 3):
+                action = 'SELL'
+                confidence = 55
             
             return {
                 'action': action,
                 'signal_count': len(signals),
                 'signals': signals,
                 'strength': strength,
+                'confidence': confidence,
                 'rsi': float(row['rsi']),
                 'macd': float(row['macd']),
                 'volume_ratio': float(row['volume_ratio'])
@@ -240,7 +269,11 @@ class LuxorV7PranaSystem:
                 'action': 'WAIT',
                 'signal_count': 0,
                 'signals': [],
-                'strength': 0
+                'strength': 0,
+                'confidence': 0,
+                'rsi': 50.0,
+                'macd': 0.0,
+                'volume_ratio': 1.0
             }
     
     def calculate_risk_management(self, row, atr_val):
@@ -274,6 +307,9 @@ class LuxorV7PranaSystem:
             row = df.iloc[-1]
             risk = self.calculate_risk_management(row, row['atr'])
             
+            # Use signal confidence if available, otherwise calculate from strength
+            final_confidence = signal['confidence'] if signal['action'] != 'WAIT' else min(100, signal['strength'] * 12)
+            
             # Build output
             output = {
                 'status': 'success',
@@ -282,7 +318,7 @@ class LuxorV7PranaSystem:
                 'entry_price': risk['entry'],
                 'stop_loss': risk['sl'],
                 'take_profit': risk['tp'],
-                'confidence': min(100, signal['strength'] * 15),
+                'confidence': final_confidence,
                 'signal_count': signal['signal_count'],
                 'signals': signal['signals'],
                 'rsi': signal['rsi'],
@@ -293,7 +329,7 @@ class LuxorV7PranaSystem:
                 'candles_analyzed': len(df)
             }
             
-            print(f"[SIGNAL] Generated: {output['signal_type']} (strength: {signal['strength']})")
+            print(f"[SIGNAL] Generated: {output['signal_type']} (confidence: {final_confidence}%, strength: {signal['strength']})")
             return output
         
         except Exception as e:
