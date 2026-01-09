@@ -5,6 +5,7 @@ from luxor_v7_prana import LuxorV7PranaSystem
 from config import *
 import traceback
 import sys
+import json
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
@@ -17,7 +18,7 @@ luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - OPTIMIZED"""
+    """Generate daily LUXOR V7 signal - COMPLETE WITH ALL FIELDS"""
     try:
         print("\n" + "="*80)
         print("[API] GET /signal/daily")
@@ -43,31 +44,112 @@ async def get_daily_signal():
         if output.get('status') == 'error':
             raise Exception(output.get('detail'))
         
-        # Format response
-        print("[API-3/3] Formatting response...")
-        response = {
-            'status': 'success',
-            'timestamp': output['timestamp'],
+        # Format COMPLETE response with all DB fields
+        print("[API-3/3] Formatting complete response...")
+        
+        # Calculate confluence score
+        confluence_score = output['signal_count'] * 10
+        
+        # Determine Ichimoku signal
+        ichimoku_signal = "BULLISH" if output['signal_type'] == 'BUY' else "BEARISH" if output['signal_type'] == 'SELL' else "NEUTRAL"
+        
+        # Enneagram state mapping (based on signal type and RSI)
+        rsi_val = output['rsi']
+        if output['signal_type'] == 'BUY':
+            if rsi_val < 30:
+                enneagram_state = 5
+                enneagram_arrow = "Growth"
+            elif rsi_val < 50:
+                enneagram_state = 7
+                enneagram_arrow = "Growth"
+            else:
+                enneagram_state = 8
+                enneagram_arrow = "Growth"
+        elif output['signal_type'] == 'SELL':
+            if rsi_val > 70:
+                enneagram_state = 3
+                enneagram_arrow = "Stress"
+            elif rsi_val > 60:
+                enneagram_state = 4
+                enneagram_arrow = "Stress"
+            else:
+                enneagram_state = 5
+                enneagram_arrow = "Stress"
+        else:  # WAIT
+            if rsi_val < 40:
+                enneagram_state = 6
+                enneagram_arrow = "Neutral"
+            elif rsi_val > 60:
+                enneagram_state = 2
+                enneagram_arrow = "Neutral"
+            else:
+                enneagram_state = 9
+                enneagram_arrow = "Neutral"
+        
+        # Gann Square of 9 levels (calculate from entry price)
+        entry_price = output['entry_price']
+        sq9_base = int(entry_price / 1000) * 1000
+        gann_sq9_levels = {
+            "base": sq9_base,
+            "level_1": sq9_base + 1000,
+            "level_2": sq9_base + 2000,
+            "level_3": sq9_base + 3000,
+            "support_1": sq9_base - 1000,
+            "support_2": sq9_base - 2000
+        }
+        
+        # Gann angles (calculate from entry)
+        gann_angles_active = {
+            "1x1_up": entry_price + (output['atr'] * 1),
+            "1x1_down": entry_price - (output['atr'] * 1),
+            "2x1_up": entry_price + (output['atr'] * 2),
+            "2x1_down": entry_price - (output['atr'] * 2)
+        }
+        
+        # Confluence details
+        confluence_details = {
+            "price_confluences": output['signal_count'],
+            "time_confluences": 0,
+            "signals": output['signals'],
+            "rsi_confluences": 1 if (rsi_val < 30 or rsi_val > 70) else 0,
+            "macd_confluences": 1 if output['macd'] > 0 else 0,
+            "volume_confluences": 1 if output['volume_ratio'] > 1.1 else 0
+        }
+        
+        response_data = {
+            'symbol': 'BTCUSDT',
+            'signal_date': datetime.now().isoformat() + 'Z',
             'signal_type': output['signal_type'],
             'entry_price': float(output['entry_price']),
             'stop_loss': float(output['stop_loss']),
             'take_profit': float(output['take_profit']),
             'confidence': int(output['confidence']),
-            'signal_count': output['signal_count'],
-            'signals': output['signals'],
-            'rsi': float(output['rsi']),
-            'macd': float(output['macd']),
-            'volume_ratio': float(output['volume_ratio']),
-            'atr': float(output['atr']),
+            'confluence_score': confluence_score,
+            'active_pivot_id': None,
+            'gann_sq9_levels': gann_sq9_levels,
+            'gann_angles_active': gann_angles_active,
+            'enneagram_state': enneagram_state,
+            'enneagram_arrow': enneagram_arrow,
+            'price_confluences': output['signal_count'],
+            'time_confluences': 0,
+            'confluence_details': json.dumps(confluence_details),
+            'rsi_value': float(output['rsi']),
+            'macd_signal': float(output['macd']),
+            'ichimoku_signal': ichimoku_signal,
+            'status': 'PENDING',
+            'timestamp': datetime.now().isoformat(),
             'last_date': output['last_date'],
-            'candles_analyzed': output['candles_analyzed']
+            'candles_analyzed': output['candles_analyzed'],
+            'atr': float(output['atr']),
+            'volume_ratio': float(output['volume_ratio']),
+            'signals_list': output['signals']
         }
         
-        print(f"[API-3/3] ✅ Response ready")
+        print(f"[API-3/3] ✅ Response ready with all fields")
         print("="*80 + "\n")
         sys.stdout.flush()
         
-        return response
+        return response_data
     
     except Exception as e:
         error_msg = f"[ERROR] /signal/daily: {str(e)}"
@@ -92,9 +174,9 @@ async def startup_event():
     print(f"🚀 {SERVICE_NAME} v2.0.0 - OPTIMIZED RUNTIME")
     print("="*80)
     print(f"📊 System: LUXOR V7 PRANA Egypt-India Unified")
-    print(f"⚡ Features: Caching, Fast Indicators, Improved Signals")
+    print(f"⚡ Features: Complete Signal Fields, Gann Levels, Enneagram States")
     print(f"🔗 Endpoints:")
-    print(f"   • GET /signal/daily → Daily signal generation")
+    print(f"   • GET /signal/daily → Daily signal generation (COMPLETE)")
     print(f"   • GET /health → Health check")
     print(f"⏰ Timestamp: {datetime.now().isoformat()}")
     print("="*80 + "\n")
