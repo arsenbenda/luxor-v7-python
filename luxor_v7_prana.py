@@ -20,7 +20,7 @@ class LuxorV7PranaSystem:
         self.sidereal_epoch = pd.Timestamp('1900-01-01')
     
     def fetch_real_binance_data(self):
-    """Scarica dati reali Binance BTCUSDT 2017-2026"""
+        """Scarica dati reali Binance BTCUSDT 2017-2026"""
     try:
         print("⏳ Downloading BTCUSDT data...")
         url = "https://www.cryptodatadownload.com/cdd/Binance_BTCUSDT_d.csv"
