@@ -45,12 +45,12 @@ class LuxorV7PranaSystem:
         df = df.dropna()
         
         print(f"✅ Downloaded {len(df)} candles")
-        return df
     except Exception as e:
         print(f"❌ Error in fetch_real_binance_data: {e}")
         import traceback
         traceback.print_exc()
         return None
+                return df
 
     
     def calculate_law_of_three_four(self, df, lookback=52):
