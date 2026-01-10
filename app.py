@@ -16,9 +16,53 @@ app = FastAPI(
 # Initialize once
 luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 
+def calculate_active_pivot(df, current_price):
+    """Calcola il pivot più vicino al prezzo attuale"""
+    try:
+        # Identifica i pivot (swing high/low)
+        pivots = []
+        
+        for i in range(2, len(df) - 2):
+            # Swing High
+            if (df['high'].iloc[i] > df['high'].iloc[i-1] and 
+                df['high'].iloc[i] > df['high'].iloc[i-2] and
+                df['high'].iloc[i] > df['high'].iloc[i+1] and 
+                df['high'].iloc[i] > df['high'].iloc[i+2]):
+                pivots.append({
+                    'id': i,
+                    'price': df['high'].iloc[i],
+                    'type': 'HIGH',
+                    'date': df['date'].iloc[i],
+                    'distance': abs(df['high'].iloc[i] - current_price)
+                })
+            
+            # Swing Low
+            if (df['low'].iloc[i] < df['low'].iloc[i-1] and 
+                df['low'].iloc[i] < df['low'].iloc[i-2] and
+                df['low'].iloc[i] < df['low'].iloc[i+1] and 
+                df['low'].iloc[i] < df['low'].iloc[i+2]):
+                pivots.append({
+                    'id': i,
+                    'price': df['low'].iloc[i],
+                    'type': 'LOW',
+                    'date': df['date'].iloc[i],
+                    'distance': abs(df['low'].iloc[i] - current_price)
+                })
+        
+        if not pivots:
+            return None
+        
+        # Trova il pivot più vicino
+        closest_pivot = min(pivots, key=lambda x: x['distance'])
+        return closest_pivot
+    
+    except Exception as e:
+        print(f"[WARNING] Error calculating active_pivot: {e}")
+        return None
+
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - COMPLETE WITH POSITION FIELDS"""
+    """Generate daily LUXOR V7 signal - COMPLETE WITH ACTIVE PIVOT"""
     try:
         print("\n" + "="*80)
         print("[API] GET /signal/daily")
@@ -26,26 +70,40 @@ async def get_daily_signal():
         sys.stdout.flush()
         
         # Fetch data (with caching)
-        print("[API-1/3] Fetching data...")
+        print("[API-1/4] Fetching data...")
         df = luxor.fetch_real_binance_data(use_cache=True)
         
         if df is None or len(df) < 100:
             raise Exception(f"Insufficient data: {len(df) if df is not None else 0}")
         
-        print(f"[API-1/3] ✅ Data: {len(df)} candles")
+        print(f"[API-1/4] ✅ Data: {len(df)} candles")
         sys.stdout.flush()
         
         # Calculate and evaluate
-        print("[API-2/3] Calculating signal...")
+        print("[API-2/4] Calculating signal...")
         output = luxor.get_daily_signal(df)
-        print(f"[API-2/3] ✅ Signal: {output.get('signal_type', 'ERROR')}")
+        print(f"[API-2/4] ✅ Signal: {output.get('signal_type', 'ERROR')}")
         sys.stdout.flush()
         
         if output.get('status') == 'error':
             raise Exception(output.get('detail'))
         
+        # Calculate active pivot
+        print("[API-3/4] Calculating active pivot...")
+        current_price = output['entry_price']
+        active_pivot = calculate_active_pivot(df, current_price)
+        
+        if active_pivot:
+            active_pivot_id = int(active_pivot['id'])
+            print(f"[API-3/4] ✅ Active Pivot: ID={active_pivot_id}, Price=${active_pivot['price']:.2f}, Type={active_pivot['type']}")
+        else:
+            active_pivot_id = None
+            print("[API-3/4] ⚠️ No active pivot found")
+        
+        sys.stdout.flush()
+        
         # Format COMPLETE response with all DB fields
-        print("[API-3/3] Formatting complete response...")
+        print("[API-4/4] Formatting complete response...")
         
         # Calculate confluence score
         confluence_score = output['signal_count'] * 10
@@ -150,7 +208,7 @@ async def get_daily_signal():
             'take_profit': float(output['take_profit']),
             'confidence': int(output['confidence']),
             'confluence_score': confluence_score,
-            'active_pivot_id': None,
+            'active_pivot_id': active_pivot_id,  # ✅ AGGIUNTO
             'gann_sq9_levels': gann_sq9_levels,
             'gann_angles_active': gann_angles_active,
             'enneagram_state': enneagram_state,
@@ -189,7 +247,8 @@ async def get_daily_signal():
             'exit_reason': exit_reason_calculated,
             'signal_type': output['signal_type'],
             'rsi_entry': float(output['rsi']),
-            'macd_entry': float(output['macd'])
+            'macd_entry': float(output['macd']),
+            'active_pivot_id': active_pivot_id  # ✅ AGGIUNTO
         }
         
         # Combined response (per N8N passthrough)
@@ -198,10 +257,9 @@ async def get_daily_signal():
             **response_position
         }
         
-        print(f"[API-3/3] ✅ Response ready with SIGNAL + POSITION fields")
-        print(f"   Entry: ${response_position['entry_price']:.2f}")
-        print(f"   Target Close: ${response_position['close_price']:.2f}")
-        print(f"   Expected P&L: ${response_position['pnl']:.2f} ({response_position['pnl_pct']:.2f}%)")
+        print(f"[API-4/4] ✅ Response ready with ACTIVE_PIVOT")
+        if active_pivot:
+            print(f"   Active Pivot: ID={active_pivot_id}, Price=${active_pivot['price']:.2f}")
         print("="*80 + "\n")
         sys.stdout.flush()
         
@@ -230,7 +288,7 @@ async def startup_event():
     print(f"🚀 {SERVICE_NAME} v2.0.0 - OPTIMIZED RUNTIME")
     print("="*80)
     print(f"📊 System: LUXOR V7 PRANA Egypt-India Unified")
-    print(f"⚡ Features: Complete Signal+Position Fields, Smart Exit Calc")
+    print(f"⚡ Features: Complete Fields + Active Pivot Detection")
     print(f"🔗 Endpoints:")
     print(f"   • GET /signal/daily → Daily signal generation (COMPLETE)")
     print(f"   • GET /health → Health check")
