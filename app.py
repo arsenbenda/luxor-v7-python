@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from datetime import datetime
+from datetime import datetime, timedelta
 import uvicorn
 from luxor_v7_prana import LuxorV7PranaSystem
 from config import *
@@ -18,7 +18,7 @@ luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - COMPLETE WITH ALL FIELDS"""
+    """Generate daily LUXOR V7 signal - COMPLETE WITH POSITION FIELDS"""
     try:
         print("\n" + "="*80)
         print("[API] GET /signal/daily")
@@ -116,9 +116,34 @@ async def get_daily_signal():
             "volume_confluences": 1 if output['volume_ratio'] > 1.1 else 0
         }
         
-        response_data = {
+        # ===== POSITION FIELDS (For Save Position to DB) =====
+        
+        now = datetime.now()
+        entry_date = now
+        
+        # Calculate exit date (21 giorni = 3 settimane = Gann cycle standard)
+        close_date_calculated = entry_date + timedelta(days=21)
+        
+        # Close price = TP (target profit)
+        close_price_calculated = output['take_profit']
+        
+        # Calculate P&L
+        position_size = 15  # 15%
+        pnl_amount = (close_price_calculated - entry_price) * (position_size / 100) * (10000 / 100)  # Basato su $10k capitale
+        pnl_pct_calculated = ((close_price_calculated - entry_price) / entry_price) * 100
+        
+        # Exit reason (intelligente)
+        if output['signal_type'] == 'BUY':
+            exit_reason_calculated = "TP_HIT"
+        elif output['signal_type'] == 'SELL':
+            exit_reason_calculated = "TP_HIT"
+        else:
+            exit_reason_calculated = "TIME_EXIT"  # Esce dopo 21 giorni se WAIT
+        
+        # Signal response (per Save Signal to DB)
+        response_signal = {
             'symbol': 'BTCUSDT',
-            'signal_date': datetime.now().isoformat() + 'Z',
+            'signal_date': now.isoformat() + 'Z',
             'signal_type': output['signal_type'],
             'entry_price': float(output['entry_price']),
             'stop_loss': float(output['stop_loss']),
@@ -137,7 +162,7 @@ async def get_daily_signal():
             'macd_signal': float(output['macd']),
             'ichimoku_signal': ichimoku_signal,
             'status': 'PENDING',
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': now.isoformat(),
             'last_date': output['last_date'],
             'candles_analyzed': output['candles_analyzed'],
             'atr': float(output['atr']),
@@ -145,7 +170,38 @@ async def get_daily_signal():
             'signals_list': output['signals']
         }
         
-        print(f"[API-3/3] ✅ Response ready with all fields")
+        # Position response (per Save Position to DB)
+        response_position = {
+            'symbol': 'BTCUSDT',
+            'entry_date': entry_date.isoformat() + 'Z',
+            'entry_price': float(output['entry_price']),
+            'stop_loss': float(output['stop_loss']),
+            'take_profit': float(output['take_profit']),
+            'position_size_pct': 15,
+            'enneagram_entry_state': enneagram_state,
+            'gann_cycle_target': 21,  # 21 giorni = 3 settimane
+            'confluence_score_entry': confluence_score,
+            'status': 'OPEN',
+            'close_date': close_date_calculated.isoformat() + 'Z',
+            'close_price': float(close_price_calculated),
+            'pnl': float(pnl_amount),
+            'pnl_pct': float(pnl_pct_calculated),
+            'exit_reason': exit_reason_calculated,
+            'signal_type': output['signal_type'],
+            'rsi_entry': float(output['rsi']),
+            'macd_entry': float(output['macd'])
+        }
+        
+        # Combined response (per N8N passthrough)
+        response_data = {
+            **response_signal,
+            **response_position
+        }
+        
+        print(f"[API-3/3] ✅ Response ready with SIGNAL + POSITION fields")
+        print(f"   Entry: ${response_position['entry_price']:.2f}")
+        print(f"   Target Close: ${response_position['close_price']:.2f}")
+        print(f"   Expected P&L: ${response_position['pnl']:.2f} ({response_position['pnl_pct']:.2f}%)")
         print("="*80 + "\n")
         sys.stdout.flush()
         
@@ -174,7 +230,7 @@ async def startup_event():
     print(f"🚀 {SERVICE_NAME} v2.0.0 - OPTIMIZED RUNTIME")
     print("="*80)
     print(f"📊 System: LUXOR V7 PRANA Egypt-India Unified")
-    print(f"⚡ Features: Complete Signal Fields, Gann Levels, Enneagram States")
+    print(f"⚡ Features: Complete Signal+Position Fields, Smart Exit Calc")
     print(f"🔗 Endpoints:")
     print(f"   • GET /signal/daily → Daily signal generation (COMPLETE)")
     print(f"   • GET /health → Health check")
