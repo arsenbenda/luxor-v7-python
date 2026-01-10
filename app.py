@@ -6,12 +6,13 @@ from config import *
 import traceback
 import sys
 import math
+import json
 import numpy as np
 import pandas as pd
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
-    version="4.0.4",
+    version="4.0.5",
     description="Enneagram-Gann Integration System - INVINCIBLE Edition with Price Confluence"
 )
 
@@ -1019,10 +1020,10 @@ def calculate_price_direction(signals_list, signal_type, ichimoku_signal, rsi_va
 
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - INVINCIBLE Edition v4.0.4 with Legacy DB Fields"""
+    """Generate daily LUXOR V7 signal - INVINCIBLE Edition v4.0.5 with DB-Compatible Fields"""
     try:
         print("\n" + "="*80)
-        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.4")
+        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.5")
         print("="*80)
         sys.stdout.flush()
         
@@ -1192,51 +1193,64 @@ async def get_daily_signal():
         take_profit_price = round(float(target_1['price']), 2) if target_1 else round(current_price + atr_value * 3, 2)
         stop_loss_price = round(float(invalidation['price']), 2) if invalidation else round(current_price - atr_value * 1.5, 2)
         
-        # Prepare Sq9 levels for DB (key levels only)
+        # Prepare Sq9 levels for DB (key levels only) - as JSON string
         gann_sq9_levels_db = [
             {'angle': lvl['angle'], 'price': lvl['price'], 'direction': lvl['direction'], 'type': lvl['type']}
             for lvl in sq9_levels if lvl['angle'] in [90, 180, 270, 360]
         ]
         
-        # Prepare active Gann angles
+        # Prepare active Gann angles - as JSON string
         gann_angles_active_db = [lvl['angle'] for lvl in sq9_levels if lvl.get('active', False)]
         
-        # Build response with ALL legacy field names for database compatibility
+        # Prepare confluence details for DB - as JSON string
+        confluence_details_db = {
+            'score': confirmation_score,
+            'breakdown': score_breakdown,
+            'zones_count': len(confluence_zones),
+            'strong_zones_count': len(strong_zones),
+            'sources': list(set(s for z in strong_zones for s in z.get('sources', [])))
+        }
+        
+        # Build response with ALL fields matching exact DB schema types
         response_data = {
             # ==================== CORE FIELDS ====================
             'status': 'success',
-            'version': '4.0.4',
+            'version': '4.0.5',
             'timestamp': datetime.now().isoformat(),
             'signal_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'symbol': 'BTCUSDT',
             'entry_price': round(current_price, 2),
             
-            # ==================== LEGACY DB FIELDS (CRITICAL) ====================
-            # These field names match your existing database schema
-            'signal_type': output.get('signal_type', 'WAIT'),
-            'take_profit': take_profit_price,
-            'stop_loss': stop_loss_price,
-            'confidence': output.get('confidence', 0),
-            'confluence_score': confirmation_score,  # LEGACY NAME
-            'active_pivot_id': active_pivot['id'] if active_pivot else None,  # LEGACY NAME
-            'gann_sq9_levels': gann_sq9_levels_db,  # LEGACY NAME
-            'gann_angles_active': gann_angles_active_db,  # LEGACY NAME
-            'enneagram_state': enneagram_state,  # LEGACY NAME
-            'enneagram_arrow': arrow_type,  # LEGACY NAME
-            'price_confluences': [z['price'] for z in strong_zones[:5]],  # LEGACY NAME
-            'time_confluences': [tw['target_date'] for tw in time_windows],  # LEGACY NAME
-            'confluence_details': {  # LEGACY NAME
-                'score': confirmation_score,
-                'breakdown': score_breakdown,
-                'zones_count': len(confluence_zones),
-                'strong_zones_count': len(strong_zones),
-                'sources': list(set(s for z in strong_zones for s in z.get('sources', [])))
-            },
-            'rsi_value': round(output.get('rsi', 50), 2),
-            'macd_signal': round(output.get('macd', 0), 4),  # LEGACY NAME
-            'ichimoku_signal': ichimoku['cloud_signal'],  # LEGACY NAME
+            # ==================== DB FIELDS (EXACT TYPES) ====================
+            # These match your PostgreSQL schema exactly
+            
+            # varchar fields
+            'signal_type': str(output.get('signal_type', 'WAIT')),
+            'enneagram_arrow': str(arrow_type),
+            'macd_signal': str(round(output.get('macd', 0), 4)),
+            'ichimoku_signal': str(ichimoku['cloud_signal']),
+            
+            # numeric fields
+            'take_profit': float(take_profit_price),
+            'stop_loss': float(stop_loss_price),
+            'rsi_value': round(float(output.get('rsi', 50)), 2),
+            
+            # integer fields
+            'confidence': int(output.get('confidence', 0)),
+            'confluence_score': int(confirmation_score),
+            'active_pivot_id': int(active_pivot['id']) if active_pivot else None,
+            'enneagram_state': int(enneagram_state),
+            'price_confluences': int(len(strong_zones)),
+            'time_confluences': int(len(time_windows)),
+            
+            # text fields (JSON strings)
+            'gann_sq9_levels': json.dumps(gann_sq9_levels_db),
+            'gann_angles_active': json.dumps(gann_angles_active_db),
+            'confluence_details': json.dumps(confluence_details_db),
             
             # ==================== EXTENDED DATA (for Telegram) ====================
+            # These are NOT saved to DB but used for Telegram messages
+            
             # Enneagram details
             'state': enneagram_state,
             'state_name': state_info['name'],
@@ -1273,7 +1287,7 @@ async def get_daily_signal():
             'tk_cross': ichimoku['tk_cross'],
             'kijun_flat': ichimoku['kijun_flat'],
             
-            # Confluence zones
+            # Confluence zones (for Telegram)
             'confluence_zones': confluence_zones[:10],
             'strong_confluence_zones': strong_zones[:5],
             'key_zones': key_zones,
@@ -1285,7 +1299,7 @@ async def get_daily_signal():
             'target_2': target_2,
             'target_3': target_3,
             
-            # Time windows
+            # Time windows (for Telegram)
             'gann_time_windows': time_windows,
             'pivot_forecast_primary': primary_pivot,
             'active_pivot': {
@@ -1295,18 +1309,18 @@ async def get_daily_signal():
                 'date': str(active_pivot['date']) if active_pivot else None
             } if active_pivot else None,
             
-            # Confirmation
-            'confirmation_score': confirmation_score,
+            # Confirmation (for Telegram)
+            'confirmation_score_display': confirmation_score,
             'score_breakdown': score_breakdown,
             'signal_strength': signal_strength,
             'strength_emoji': strength_emoji,
             'position_advice': position_advice,
             
-            # Original signals
+            # Original signals (for Telegram)
             'signals_list': output.get('signals', []),
             'signal_count': output.get('signal_count', 0),
             
-            # Indicators
+            # Indicators (for Telegram)
             'adx_value': round(float(df['adx'].iloc[idx]), 2) if 'adx' in df.columns else 20.0,
             'macd_value': round(output.get('macd', 0), 4),
             'volume_ratio': round(output.get('volume_ratio', 1), 2),
@@ -1318,7 +1332,7 @@ async def get_daily_signal():
         }
         
         print("\n" + "="*80)
-        print("[SUCCESS] INVINCIBLE SIGNAL GENERATED v4.0.4")
+        print("[SUCCESS] INVINCIBLE SIGNAL GENERATED v4.0.5")
         print(f"State: {enneagram_state} → {target_state} ({state_info['name']} to {target_info['name']})")
         print(f"Direction: {price_direction_data['price_direction']} {price_direction_data['direction_probability']}%")
         print(f"Confirmation: {confirmation_score}% ({signal_strength})")
@@ -1342,7 +1356,7 @@ async def health_check():
     return {
         'status': 'healthy',
         'service': 'LUXOR V7 PRANA Runtime',
-        'version': '4.0.4',
+        'version': '4.0.5',
         'edition': 'INVINCIBLE',
         'timestamp': datetime.now().isoformat()
     }
@@ -1352,9 +1366,9 @@ async def health_check():
 async def startup_event():
     """Startup event handler."""
     print("\n" + "="*80)
-    print("  LUXOR V7 PRANA RUNTIME - INVINCIBLE EDITION v4.0.4")
+    print("  LUXOR V7 PRANA RUNTIME - INVINCIBLE EDITION v4.0.5")
     print("  Enneagram-Gann Integration System with Price Confluence")
-    print("  Legacy DB Fields Restored for Full Compatibility")
+    print("  DB Schema Compatible - All Field Types Matched")
     print("="*80)
     print(f"  Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("  Endpoints:")
