@@ -1242,6 +1242,8 @@ async def get_daily_signal():
             'enneagram_state': int(enneagram_state),
             'price_confluences': int(len(strong_zones)),
             'time_confluences': int(len(time_windows)),
+            'gann_cycle_target': int(time_windows[0]['cycle_length']) if time_windows else 30,
+
             
             # text fields (JSON strings)
             'gann_sq9_levels': json.dumps(gann_sq9_levels_db),
