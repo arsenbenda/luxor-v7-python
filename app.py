@@ -12,7 +12,7 @@ import pandas as pd
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
-    version="4.0.1",
+    version="4.0.2",
     description="Enneagram-Gann Integration System - INVINCIBLE Edition with Price Confluence"
 )
 
@@ -27,7 +27,6 @@ luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 def sanitize_for_json(obj):
     """
     Recursively convert numpy types to native Python types for JSON serialization.
-    Fixes: TypeError: 'numpy.bool_' object is not iterable
     """
     if obj is None:
         return None
@@ -49,7 +48,7 @@ def sanitize_for_json(obj):
         return obj.isoformat()
     elif isinstance(obj, pd.Series):
         return obj.tolist()
-    elif hasattr(obj, 'item'):  # Generic numpy scalar
+    elif hasattr(obj, 'item'):
         try:
             return obj.item()
         except:
@@ -859,7 +858,7 @@ async def get_daily_signal():
     """Generate daily LUXOR V7 signal - INVINCIBLE Edition with Price Confluence"""
     try:
         print("\n" + "="*80)
-        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.1")
+        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.2")
         print("="*80)
         sys.stdout.flush()
         
@@ -987,8 +986,19 @@ async def get_daily_signal():
         print(f"[10/10] ✅ Confirmation: {confirmation_score}% → {signal_strength}")
         sys.stdout.flush()
         
-        # Build response
+        # =====================================================================
+        # BUILD RESPONSE - WITH FIXED TP/SL AS NUMBERS
+        # =====================================================================
+        
         now = datetime.now()
+        
+        # Get numeric values for TP/SL (for DB compatibility)
+        # Extract price from zone object, fallback to original output values
+        tp_zone = key_zones.get('target_1')
+        sl_zone = key_zones.get('invalidation')
+        
+        tp_price = float(tp_zone['price_avg']) if tp_zone else float(output['take_profit'])
+        sl_price = float(sl_zone['price_avg']) if sl_zone else float(output['stop_loss'])
         
         # Primary pivot forecast
         primary_pivot = None
@@ -1019,7 +1029,7 @@ async def get_daily_signal():
                 'is_nearby': bool(z['is_nearby'])
             })
         
-        # Format key zones
+        # Format key zones (objects with full details for Telegram)
         key_zones_formatted = {}
         for key, zone in key_zones.items():
             if zone:
@@ -1030,15 +1040,26 @@ async def get_daily_signal():
                 }
         
         response_data = {
+            # Basic info
             'symbol': 'BTCUSDT',
             'signal_date': now.isoformat() + 'Z',
             'timestamp': now.isoformat(),
             'last_date': str(output['last_date']),
             'candles_analyzed': int(output['candles_analyzed']),
             
+            # Price data
             'entry_price': float(current_price),
             'atr': float(output['atr']),
             
+            # ===== TP/SL AS NUMBERS FOR DB =====
+            'take_profit': tp_price,
+            'stop_loss': sl_price,
+            
+            # ===== TP/SL ZONES WITH DETAILS FOR TELEGRAM =====
+            'take_profit_zone': key_zones_formatted.get('target_1'),
+            'stop_loss_zone': key_zones_formatted.get('invalidation'),
+            
+            # Enneagram State
             'enneagram_state': int(enneagram_state),
             'enneagram_state_name': str(state_info['name']),
             'enneagram_phase': str(state_info['phase']),
@@ -1047,23 +1068,28 @@ async def get_daily_signal():
             'enneagram_target_state': int(target_state),
             'enneagram_target_name': str(target_info['name']),
             
+            # Direction
             'price_direction': str(direction),
             'direction_emoji': str(direction_emoji),
             'direction_probability': float(arrow_confidence),
             'direction_reasoning': f"State {enneagram_state} ({state_info['name']}) → {arrow_type} → State {target_state} ({target_info['name']})",
             
+            # Market Regime
             'market_regime': str(market_regime),
             'sma_200': float(sma_200),
             
+            # Confirmation
             'confirmation_score': int(confirmation_score),
             'signal_strength': str(signal_strength),
             'position_advice': str(position_advice),
             'strength_emoji': str(strength_emoji),
             'score_breakdown': score_breakdown,
             
+            # Signal
             'signal_type': 'BUY' if is_bullish and confirmation_score >= 50 else 'SELL' if not is_bullish and confirmation_score >= 50 else 'WAIT',
             'confidence': int(confirmation_score),
             
+            # Gann Eighths
             'gann_eighths': {
                 'major_high': float(major_pivots['major_high']),
                 'major_low': float(major_pivots['major_low']),
@@ -1071,6 +1097,7 @@ async def get_daily_signal():
                 'levels': {k: float(v['price']) for k, v in gann_eighths.items()}
             },
             
+            # Ichimoku
             'ichimoku': {
                 'tenkan': float(ichimoku['tenkan']),
                 'kijun': float(ichimoku['kijun']),
@@ -1084,37 +1111,45 @@ async def get_daily_signal():
                 'kijun_flat': bool(ichimoku['kijun_flat'])
             },
             
+            # Square of 9
             'sq9_levels': [
                 {'angle': int(l['angle']), 'direction': str(l['direction']), 'price': float(l['price']), 'distance_pct': float(l['distance_pct'])}
                 for l in sq9_levels[:12]
             ],
             
+            # Confluence Zones
             'confluence_zones': formatted_zones,
             'strong_confluence_zones': [z for z in formatted_zones if z['strength'] >= 70],
             'key_zones': key_zones_formatted,
             
+            # Target zones (objects with full details)
             'target_1': key_zones_formatted.get('target_1'),
             'target_2': key_zones_formatted.get('target_2'),
             'target_3': key_zones_formatted.get('target_3'),
-            'stop_loss': key_zones_formatted.get('invalidation', {'price': float(output['stop_loss'])}),
-            'take_profit': key_zones_formatted.get('target_1', {'price': float(output['take_profit'])}),
             
+            # Time Windows
             'gann_time_windows': time_windows,
             'pivot_forecast_primary': primary_pivot,
             
+            # Technical Indicators
             'rsi_value': float(output['rsi']),
             'macd_signal': float(output['macd']),
             'volume_ratio': float(output['volume_ratio']),
             'adx_value': float(df['adx'].iloc[-1]),
             
+            # Signal counts
             'bullish_signals_count': int(sum(1 for s in output['signals'] if s in ['TREND_UP', 'RSI_OVERSOLD', 'RSI_WEAK', 'MACD_BULLISH', 'ICHIMOKU_BULL', 'ABOVE_PIVOT', 'HIGH_VOLUME'])),
             'bearish_signals_count': int(sum(1 for s in output['signals'] if s in ['RSI_OVERBOUGHT', 'RSI_STRONG', 'MACD_BEARISH', 'ICHIMOKU_BEAR', 'BELOW_PIVOT'])),
             'signals_list': list(output['signals']),
             
+            # Legacy compatibility
             'status': 'PENDING',
             'confluence_score': int(confirmation_score),
             'price_confluences': int(len([z for z in confluence_zones if z['is_nearby']])),
-            'time_confluences': int(len(time_windows))
+            'time_confluences': int(len(time_windows)),
+            
+            # Active pivot info
+            'active_pivot_id': int(active_pivot['id']) if active_pivot else None
         }
         
         # Final summary
@@ -1136,6 +1171,10 @@ async def get_daily_signal():
         print(f"   🎯 KEY CONFLUENCE ZONES:")
         for i, z in enumerate(strong_zones[:3], 1):
             print(f"      {i}. ${z['price_avg']:.2f} ({z['type']}) - {z['strength']}% [{z['num_confluences']} confluences]")
+        print(f"")
+        print(f"   💰 TARGETS:")
+        print(f"      TP: ${tp_price:.2f}")
+        print(f"      SL: ${sl_price:.2f}")
         print(f"")
         if primary_pivot:
             print(f"   📅 NEXT PIVOT: {primary_pivot['date_display']} ({primary_pivot['expected_pivot']})")
@@ -1159,7 +1198,7 @@ async def health():
     return sanitize_for_json({
         'status': 'healthy',
         'service': SERVICE_NAME,
-        'version': '4.0.1 INVINCIBLE',
+        'version': '4.0.2 INVINCIBLE',
         'features': [
             'Enneagram-Gann Integration',
             'Rule of Eighths',
@@ -1174,7 +1213,7 @@ async def health():
 @app.on_event("startup")
 async def startup_event():
     print("\n" + "="*80)
-    print(f"🏆 {SERVICE_NAME} v4.0.1 - INVINCIBLE EDITION")
+    print(f"🏆 {SERVICE_NAME} v4.0.2 - INVINCIBLE EDITION")
     print("="*80)
     print(f"")
     print(f"   ⚡ DIRECTION ENGINE:")
