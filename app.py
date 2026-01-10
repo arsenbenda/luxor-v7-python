@@ -9,8 +9,8 @@ import json
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
-    version="2.0.0",
-    description="Egypt-India Unified Trading System - Optimized"
+    version="2.1.0",
+    description="Egypt-India Unified Trading System - With Price Direction"
 )
 
 # Initialize once
@@ -60,9 +60,135 @@ def calculate_active_pivot(df, current_price):
         print(f"[WARNING] Error calculating active_pivot: {e}")
         return None
 
+
+def calculate_price_direction(output, ichimoku_signal, rsi_val):
+    """
+    Calcola la direzione del prezzo attesa con probabilità.
+    
+    Returns:
+        dict: {
+            'direction': str (BULLISH, BEARISH, LEAN_BULLISH, LEAN_BEARISH, NEUTRAL),
+            'probability': float (0-100),
+            'emoji': str,
+            'reasoning': str
+        }
+    """
+    # Define signal categories
+    bullish_signals = ['TREND_UP', 'RSI_OVERSOLD', 'RSI_WEAK', 'RSI_MILD_UP', 
+                       'MACD_BULLISH', 'ICHIMOKU_BULL', 'ABOVE_PIVOT', 'HIGH_VOLUME', 'GANN_CYCLE']
+    bearish_signals = ['RSI_OVERBOUGHT', 'RSI_STRONG', 'RSI_MILD_DOWN',
+                       'MACD_BEARISH', 'ICHIMOKU_BEAR', 'BELOW_PIVOT']
+    
+    signals_list = output.get('signals', [])
+    signal_type = output.get('signal_type', 'WAIT')
+    confidence = output.get('confidence', 0)
+    macd_value = output.get('macd', 0)
+    
+    # Count bullish/bearish signals
+    bullish_count = sum(1 for s in signals_list if s in bullish_signals)
+    bearish_count = sum(1 for s in signals_list if s in bearish_signals)
+    total_signals = bullish_count + bearish_count
+    
+    # Initialize
+    direction = 'NEUTRAL'
+    probability = 50.0
+    emoji = '⚪ →'
+    reasoning_parts = []
+    
+    # Primary: Signal type (strongest indicator)
+    if signal_type == 'BUY':
+        direction = 'BULLISH'
+        probability = min(95, 65 + confidence * 0.30)
+        emoji = '🟢 ↑'
+        reasoning_parts.append(f"BUY signal (conf: {confidence}%)")
+        
+    elif signal_type == 'SELL':
+        direction = 'BEARISH'
+        probability = min(95, 65 + confidence * 0.30)
+        emoji = '🔴 ↓'
+        reasoning_parts.append(f"SELL signal (conf: {confidence}%)")
+        
+    else:  # WAIT - use secondary indicators
+        # Calculate bias from individual signals
+        if total_signals > 0:
+            bullish_ratio = bullish_count / total_signals
+            bearish_ratio = bearish_count / total_signals
+            
+            if bullish_ratio > 0.6:
+                direction = 'LEAN_BULLISH'
+                probability = 50 + (bullish_ratio * 25)
+                emoji = '🟡 ↗'
+                reasoning_parts.append(f"Bullish signals: {bullish_count}/{total_signals}")
+                
+            elif bearish_ratio > 0.6:
+                direction = 'LEAN_BEARISH'
+                probability = 50 + (bearish_ratio * 25)
+                emoji = '🟠 ↘'
+                reasoning_parts.append(f"Bearish signals: {bearish_count}/{total_signals}")
+                
+            else:
+                direction = 'NEUTRAL'
+                probability = 50
+                emoji = '⚪ →'
+                reasoning_parts.append("Mixed signals")
+        
+        # Secondary: Ichimoku cloud position
+        if ichimoku_signal == 'BULLISH' and direction == 'NEUTRAL':
+            direction = 'LEAN_BULLISH'
+            probability = 55
+            emoji = '🟡 ↗'
+            reasoning_parts.append("Ichimoku bullish")
+        elif ichimoku_signal == 'BEARISH' and direction == 'NEUTRAL':
+            direction = 'LEAN_BEARISH'
+            probability = 55
+            emoji = '🟠 ↘'
+            reasoning_parts.append("Ichimoku bearish")
+    
+    # Adjustments based on RSI extremes
+    if rsi_val < 25:
+        if 'BULLISH' in direction:
+            probability = min(95, probability + 10)
+            reasoning_parts.append(f"RSI extreme oversold ({rsi_val:.1f})")
+        elif direction == 'NEUTRAL':
+            direction = 'LEAN_BULLISH'
+            probability = 60
+            emoji = '🟡 ↗'
+            reasoning_parts.append(f"RSI oversold reversal zone ({rsi_val:.1f})")
+            
+    elif rsi_val > 75:
+        if 'BEARISH' in direction:
+            probability = min(95, probability + 10)
+            reasoning_parts.append(f"RSI extreme overbought ({rsi_val:.1f})")
+        elif direction == 'NEUTRAL':
+            direction = 'LEAN_BEARISH'
+            probability = 60
+            emoji = '🟠 ↘'
+            reasoning_parts.append(f"RSI overbought reversal zone ({rsi_val:.1f})")
+    
+    # MACD confirmation adjustment
+    if macd_value > 0 and 'BULLISH' in direction:
+        probability = min(95, probability + 5)
+        reasoning_parts.append("MACD positive")
+    elif macd_value < 0 and 'BEARISH' in direction:
+        probability = min(95, probability + 5)
+        reasoning_parts.append("MACD negative")
+    
+    # Build reasoning string
+    reasoning = " | ".join(reasoning_parts) if reasoning_parts else "Insufficient data"
+    
+    return {
+        'direction': direction,
+        'probability': round(probability, 1),
+        'emoji': emoji,
+        'reasoning': reasoning,
+        'bullish_signals': bullish_count,
+        'bearish_signals': bearish_count
+    }
+
+
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - COMPLETE WITH ACTIVE PIVOT"""
+    """Generate daily LUXOR V7 signal - COMPLETE WITH ACTIVE PIVOT AND PRICE DIRECTION"""
     try:
         print("\n" + "="*80)
         print("[API] GET /signal/daily")
@@ -70,40 +196,40 @@ async def get_daily_signal():
         sys.stdout.flush()
         
         # Fetch data (with caching)
-        print("[API-1/4] Fetching data...")
+        print("[API-1/5] Fetching data...")
         df = luxor.fetch_real_binance_data(use_cache=True)
         
         if df is None or len(df) < 100:
             raise Exception(f"Insufficient data: {len(df) if df is not None else 0}")
         
-        print(f"[API-1/4] ✅ Data: {len(df)} candles")
+        print(f"[API-1/5] ✅ Data: {len(df)} candles")
         sys.stdout.flush()
         
         # Calculate and evaluate
-        print("[API-2/4] Calculating signal...")
+        print("[API-2/5] Calculating signal...")
         output = luxor.get_daily_signal(df)
-        print(f"[API-2/4] ✅ Signal: {output.get('signal_type', 'ERROR')}")
+        print(f"[API-2/5] ✅ Signal: {output.get('signal_type', 'ERROR')}")
         sys.stdout.flush()
         
         if output.get('status') == 'error':
             raise Exception(output.get('detail'))
         
         # Calculate active pivot
-        print("[API-3/4] Calculating active pivot...")
+        print("[API-3/5] Calculating active pivot...")
         current_price = output['entry_price']
         active_pivot = calculate_active_pivot(df, current_price)
         
         if active_pivot:
             active_pivot_id = int(active_pivot['id'])
-            print(f"[API-3/4] ✅ Active Pivot: ID={active_pivot_id}, Price=${active_pivot['price']:.2f}, Type={active_pivot['type']}")
+            print(f"[API-3/5] ✅ Active Pivot: ID={active_pivot_id}, Price=${active_pivot['price']:.2f}, Type={active_pivot['type']}")
         else:
             active_pivot_id = None
-            print("[API-3/4] ⚠️ No active pivot found")
+            print("[API-3/5] ⚠️ No active pivot found")
         
         sys.stdout.flush()
         
         # Format COMPLETE response with all DB fields
-        print("[API-4/4] Formatting complete response...")
+        print("[API-4/5] Formatting complete response...")
         
         # Calculate confluence score
         confluence_score = output['signal_count'] * 10
@@ -143,6 +269,12 @@ async def get_daily_signal():
             else:
                 enneagram_state = 9
                 enneagram_arrow = "Neutral"
+        
+        # ===== CALCULATE PRICE DIRECTION =====
+        print("[API-5/5] Calculating price direction...")
+        price_direction_data = calculate_price_direction(output, ichimoku_signal, rsi_val)
+        print(f"[API-5/5] ✅ Direction: {price_direction_data['direction']} ({price_direction_data['probability']}%)")
+        sys.stdout.flush()
         
         # Gann Square of 9 levels (calculate from entry price)
         entry_price = output['entry_price']
@@ -208,7 +340,7 @@ async def get_daily_signal():
             'take_profit': float(output['take_profit']),
             'confidence': int(output['confidence']),
             'confluence_score': confluence_score,
-            'active_pivot_id': active_pivot_id,  # ✅ AGGIUNTO
+            'active_pivot_id': active_pivot_id,
             'gann_sq9_levels': gann_sq9_levels,
             'gann_angles_active': gann_angles_active,
             'enneagram_state': enneagram_state,
@@ -225,7 +357,14 @@ async def get_daily_signal():
             'candles_analyzed': output['candles_analyzed'],
             'atr': float(output['atr']),
             'volume_ratio': float(output['volume_ratio']),
-            'signals_list': output['signals']
+            'signals_list': output['signals'],
+            # ===== NEW: PRICE DIRECTION FIELDS =====
+            'price_direction': price_direction_data['direction'],
+            'direction_probability': price_direction_data['probability'],
+            'direction_emoji': price_direction_data['emoji'],
+            'direction_reasoning': price_direction_data['reasoning'],
+            'bullish_signals_count': price_direction_data['bullish_signals'],
+            'bearish_signals_count': price_direction_data['bearish_signals']
         }
         
         # Position response (per Save Position to DB)
@@ -248,7 +387,10 @@ async def get_daily_signal():
             'signal_type': output['signal_type'],
             'rsi_entry': float(output['rsi']),
             'macd_entry': float(output['macd']),
-            'active_pivot_id': active_pivot_id  # ✅ AGGIUNTO
+            'active_pivot_id': active_pivot_id,
+            # ===== NEW: PRICE DIRECTION FOR POSITION =====
+            'expected_direction': price_direction_data['direction'],
+            'direction_confidence': price_direction_data['probability']
         }
         
         # Combined response (per N8N passthrough)
@@ -257,7 +399,10 @@ async def get_daily_signal():
             **response_position
         }
         
-        print(f"[API-4/4] ✅ Response ready with ACTIVE_PIVOT")
+        print(f"[API] ✅ Response ready")
+        print(f"   Signal: {output['signal_type']}")
+        print(f"   Direction: {price_direction_data['emoji']} {price_direction_data['direction']} ({price_direction_data['probability']}%)")
+        print(f"   Reasoning: {price_direction_data['reasoning']}")
         if active_pivot:
             print(f"   Active Pivot: ID={active_pivot_id}, Price=${active_pivot['price']:.2f}")
         print("="*80 + "\n")
@@ -272,29 +417,32 @@ async def get_daily_signal():
         sys.stdout.flush()
         raise HTTPException(status_code=500, detail=error_msg)
 
+
 @app.get("/health")
 async def health():
     """Health check"""
     return {
         'status': 'healthy',
         'service': SERVICE_NAME,
-        'version': '2.0.0',
+        'version': '2.1.0',
         'timestamp': datetime.now().isoformat()
     }
+
 
 @app.on_event("startup")
 async def startup_event():
     print("\n" + "="*80)
-    print(f"🚀 {SERVICE_NAME} v2.0.0 - OPTIMIZED RUNTIME")
+    print(f"🚀 {SERVICE_NAME} v2.1.0 - WITH PRICE DIRECTION")
     print("="*80)
     print(f"📊 System: LUXOR V7 PRANA Egypt-India Unified")
-    print(f"⚡ Features: Complete Fields + Active Pivot Detection")
+    print(f"⚡ Features: Complete Fields + Active Pivot + Price Direction")
     print(f"🔗 Endpoints:")
-    print(f"   • GET /signal/daily → Daily signal generation (COMPLETE)")
+    print(f"   • GET /signal/daily → Daily signal with direction prediction")
     print(f"   • GET /health → Health check")
     print(f"⏰ Timestamp: {datetime.now().isoformat()}")
     print("="*80 + "\n")
     sys.stdout.flush()
+
 
 if __name__ == "__main__":
     uvicorn.run(
