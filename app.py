@@ -12,8 +12,8 @@ import pandas as pd
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
-    version="4.0.5",
-    description="Enneagram-Gann Integration System - INVINCIBLE Edition with Price Confluence"
+    version="4.0.6",
+    description="Enneagram-Gann Integration System - INVINCIBLE Edition with Price-Time Forecast"
 )
 
 # Initialize once
@@ -1020,25 +1020,25 @@ def calculate_price_direction(signals_list, signal_type, ichimoku_signal, rsi_va
 
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - INVINCIBLE Edition v4.0.5 with DB-Compatible Fields"""
+    """Generate daily LUXOR V7 signal - INVINCIBLE Edition v4.0.6 with Price-Time Forecast"""
     try:
         print("\n" + "="*80)
-        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.5")
+        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.6")
         print("="*80)
         sys.stdout.flush()
         
         # 1. Fetch data
-        print("[1/10] Fetching data...")
+        print("[1/11] Fetching data...")
         df = luxor.fetch_real_binance_data(use_cache=True)
         
         if df is None or len(df) < 100:
             raise Exception(f"Insufficient data: {len(df) if df is not None else 0}")
         
-        print(f"[1/10] ✓ Data: {len(df)} candles")
+        print(f"[1/11] ✓ Data: {len(df)} candles")
         sys.stdout.flush()
         
         # 2. Calculate base indicators
-        print("[2/10] Calculating base indicators...")
+        print("[2/11] Calculating base indicators...")
         output = luxor.get_daily_signal(df)
         
         if output.get('status') == 'error':
@@ -1049,53 +1049,53 @@ async def get_daily_signal():
         current_price = float(df['close'].iloc[idx])
         atr_value = float(df['atr'].iloc[idx]) if 'atr' in df.columns else float(output.get('atr', current_price * 0.02))
         
-        print(f"[2/10] ✓ Price: ${current_price:.2f}, RSI: {output['rsi']:.1f}, ATR: ${atr_value:.2f}")
+        print(f"[2/11] ✓ Price: ${current_price:.2f}, RSI: {output['rsi']:.1f}, ATR: ${atr_value:.2f}")
         sys.stdout.flush()
         
         # 3. Find major pivots for Gann Eighths
-        print("[3/10] Calculating Gann Rule of Eighths...")
+        print("[3/11] Calculating Gann Rule of Eighths...")
         major_pivots = find_major_pivots(df, lookback=252)
         gann_eighths = calculate_gann_eighths(major_pivots['major_high'], major_pivots['major_low'])
         
-        print(f"[3/10] ✓ Range: ${major_pivots['major_low']:.2f} - ${major_pivots['major_high']:.2f}")
+        print(f"[3/11] ✓ Range: ${major_pivots['major_low']:.2f} - ${major_pivots['major_high']:.2f}")
         print(f"       50% Level (4/8): ${gann_eighths['4/8']['price']:.2f}")
         sys.stdout.flush()
         
         # 4. Calculate Ichimoku levels
-        print("[4/10] Calculating Ichimoku Cloud levels...")
+        print("[4/11] Calculating Ichimoku Cloud levels...")
         ichimoku = get_ichimoku_levels(df, idx)
         
-        print(f"[4/10] ✓ Cloud: {ichimoku['cloud_signal']}, TK Cross: {ichimoku['tk_cross']}")
+        print(f"[4/11] ✓ Cloud: {ichimoku['cloud_signal']}, TK Cross: {ichimoku['tk_cross']}")
         print(f"       Tenkan: ${ichimoku['tenkan']:.2f}, Kijun: ${ichimoku['kijun']:.2f}")
         sys.stdout.flush()
         
         # 5. Calculate Square of 9 levels
-        print("[5/10] Calculating Square of 9 levels...")
+        print("[5/11] Calculating Square of 9 levels...")
         sq9_levels = calculate_square_of_9_levels(current_price, direction='both')
         
-        print(f"[5/10] ✓ Generated {len(sq9_levels)} Sq9 levels")
+        print(f"[5/11] ✓ Generated {len(sq9_levels)} Sq9 levels")
         sys.stdout.flush()
         
         # 6. Find confluence zones
-        print("[6/10] Finding confluence zones...")
+        print("[6/11] Finding confluence zones...")
         confluence_zones = find_confluence_zones(current_price, gann_eighths, ichimoku, sq9_levels)
         
         strong_zones = [z for z in confluence_zones if z['strength'] >= 70]
-        print(f"[6/10] ✓ Found {len(confluence_zones)} zones, {len(strong_zones)} strong (≥70%)")
+        print(f"[6/11] ✓ Found {len(confluence_zones)} zones, {len(strong_zones)} strong (≥70%)")
         for z in strong_zones[:3]:
             print(f"       ${z['price']:.2f} ({z['type']}) - {z['strength']}% - {z['num_confluences']} confluences")
         sys.stdout.flush()
         
         # 7. Identify Enneagram state
-        print("[7/10] Identifying Enneagram state...")
+        print("[7/11] Identifying Enneagram state...")
         enneagram_state, state_confidence, state_details = identify_enneagram_state(df, idx)
         state_info = MARKET_STATES[enneagram_state]
         
-        print(f"[7/10] ✓ State {enneagram_state}: {state_info['name']} ({state_confidence}%)")
+        print(f"[7/11] ✓ State {enneagram_state}: {state_info['name']} ({state_confidence}%)")
         sys.stdout.flush()
         
         # 8. Determine market regime and arrow
-        print("[8/10] Determining direction...")
+        print("[8/11] Determining direction...")
         sma_200 = float(df['close'].rolling(200).mean().iloc[-1])
         
         if current_price > sma_200 * 1.02:
@@ -1113,12 +1113,12 @@ async def get_daily_signal():
         direction = 'BULLISH' if is_bullish else 'BEARISH'
         direction_emoji = '🟢 ↑' if is_bullish else '🔴 ↓'
         
-        print(f"[8/10] ✓ {direction} ({arrow_confidence}%)")
+        print(f"[8/11] ✓ {direction} ({arrow_confidence}%)")
         print(f"       Arrow: {arrow_type.upper()} → State {target_state} ({target_info['name']})")
         sys.stdout.flush()
         
         # 9. Calculate time windows and key zones
-        print("[9/10] Calculating time windows and key zones...")
+        print("[9/11] Calculating time windows and key zones...")
         active_pivot, recent_pivots = calculate_active_pivot(df, current_price)
         
         if active_pivot:
@@ -1133,7 +1133,7 @@ async def get_daily_signal():
         time_windows = calculate_gann_time_windows(enneagram_state, target_state, pivot_date, cycles=[30, 90])
         key_zones = identify_key_zones(confluence_zones, current_price, direction, atr_value)
         
-        print(f"[9/10] ✓ Time windows calculated, key zones identified")
+        print(f"[9/11] ✓ Time windows calculated, key zones identified")
         if key_zones.get('target_1'):
             print(f"       Target 1: ${key_zones['target_1']['price']:.2f}")
         if key_zones.get('target_2'):
@@ -1141,7 +1141,7 @@ async def get_daily_signal():
         sys.stdout.flush()
         
         # 10. Generate confirmation score and final signal
-        print("[10/10] Generating confirmation score...")
+        print("[10/11] Generating confirmation score...")
         confirmation_score, score_breakdown = generate_confirmation_score(
             enneagram_state, arrow_type, is_bullish, df, idx,
             time_windows, confluence_zones, ichimoku
@@ -1157,39 +1157,130 @@ async def get_daily_signal():
             is_bullish
         )
         
-        print(f"[10/10] ✓ Confirmation: {confirmation_score}% ({signal_strength})")
+        print(f"[10/11] ✓ Confirmation: {confirmation_score}% ({signal_strength})")
         print(f"        Direction: {price_direction_data['price_direction']} ({price_direction_data['direction_probability']}%)")
         sys.stdout.flush()
+        
+        # 11. Calculate Price-Time Forecast
+        print("[11/11] Calculating price-time forecast...")
         
         # Select primary pivot forecast - always provide a future pivot
         future_windows = [tw for tw in time_windows if tw['days_from_now'] > 0]
         if future_windows:
             nearest_window = min(future_windows, key=lambda x: x['days_from_now'])
+            days_to_pivot = nearest_window['days_from_now']
             primary_pivot = {
                 'date': nearest_window['target_date'],
                 'date_display': nearest_window['target_date_display'],
-                'days_from_now': nearest_window['days_from_now'],
+                'days_from_now': days_to_pivot,
                 'expected_pivot': 'HIGH' if is_bullish else 'LOW',
                 'confidence': min(85, arrow_confidence),
                 'cycle_type': f"{nearest_window['cycle_length']}-day cycle"
             }
         else:
             fallback_date = datetime.now() + timedelta(days=7)
+            days_to_pivot = 7
             primary_pivot = {
                 'date': fallback_date.strftime('%Y-%m-%d'),
                 'date_display': fallback_date.strftime('%d/%m/%Y'),
-                'days_from_now': 7,
+                'days_from_now': days_to_pivot,
                 'expected_pivot': 'HIGH' if is_bullish else 'LOW',
                 'confidence': 55,
                 'cycle_type': 'Short-term projection'
             }
         
-        # Extract numeric values for DB
+        # Calculate maximum expected move based on ATR and days to pivot
+        efficiency_factor = 0.7
+        max_expected_move = atr_value * days_to_pivot * efficiency_factor
+        
+        # Calculate probable price range at pivot
+        if direction == 'BEARISH':
+            probable_price_low = current_price - max_expected_move
+            probable_price_high = current_price + (atr_value * days_to_pivot * 0.3)
+        else:  # BULLISH
+            probable_price_high = current_price + max_expected_move
+            probable_price_low = current_price - (atr_value * days_to_pivot * 0.3)
+        
+        # Extract target prices
         target_1 = key_zones.get('target_1')
         target_2 = key_zones.get('target_2')
         target_3 = key_zones.get('target_3')
         invalidation = key_zones.get('invalidation')
         
+        target_1_price = float(target_1['price']) if target_1 else 0
+        target_2_price = float(target_2['price']) if target_2 else 0
+        target_3_price = float(target_3['price']) if target_3 else 0
+        
+        # Check which targets are reachable (inside probable range)
+        def is_target_reachable(target_price, dir, prob_low, prob_high, curr_price):
+            if not target_price:
+                return False
+            if dir == 'BEARISH':
+                return prob_low <= target_price <= curr_price
+            else:
+                return curr_price <= target_price <= prob_high
+        
+        target_1_reachable = is_target_reachable(target_1_price, direction, probable_price_low, probable_price_high, current_price) if target_1 else False
+        target_2_reachable = is_target_reachable(target_2_price, direction, probable_price_low, probable_price_high, current_price) if target_2 else False
+        target_3_reachable = is_target_reachable(target_3_price, direction, probable_price_low, probable_price_high, current_price) if target_3 else False
+        
+        # Calculate distances
+        target_1_distance = abs(target_1_price - current_price) if target_1 else 0
+        target_2_distance = abs(target_2_price - current_price) if target_2 else 0
+        target_3_distance = abs(target_3_price - current_price) if target_3 else 0
+        
+        # Determine status text
+        def get_target_status(reachable, target_price, dir, prob_low, prob_high):
+            if not target_price:
+                return "N/A"
+            if reachable:
+                return "INSIDE range - likely hit"
+            else:
+                if dir == 'BEARISH' and target_price < prob_low:
+                    return "BELOW range - needs more time"
+                elif dir == 'BULLISH' and target_price > prob_high:
+                    return "ABOVE range - needs more time"
+                else:
+                    return "OUTSIDE range - needs more time"
+        
+        target_1_status = get_target_status(target_1_reachable, target_1_price, direction, probable_price_low, probable_price_high)
+        target_2_status = get_target_status(target_2_reachable, target_2_price, direction, probable_price_low, probable_price_high)
+        target_3_status = get_target_status(target_3_reachable, target_3_price, direction, probable_price_low, probable_price_high)
+        
+        # Build price-time forecast object
+        price_time_forecast = {
+            'days_to_pivot': int(days_to_pivot),
+            'atr_daily': round(float(atr_value), 2),
+            'max_expected_move': round(float(max_expected_move), 2),
+            'efficiency_factor': efficiency_factor,
+            'probable_price_low': round(float(probable_price_low), 2),
+            'probable_price_high': round(float(probable_price_high), 2),
+            'probable_range_text': f"${round(probable_price_low):,} - ${round(probable_price_high):,}",
+            'target_1_price': round(float(target_1_price), 2) if target_1 else None,
+            'target_1_reachable': bool(target_1_reachable),
+            'target_1_distance': round(float(target_1_distance), 2),
+            'target_1_status': target_1_status,
+            'target_2_price': round(float(target_2_price), 2) if target_2 else None,
+            'target_2_reachable': bool(target_2_reachable),
+            'target_2_distance': round(float(target_2_distance), 2),
+            'target_2_status': target_2_status,
+            'target_3_price': round(float(target_3_price), 2) if target_3 else None,
+            'target_3_reachable': bool(target_3_reachable),
+            'target_3_distance': round(float(target_3_distance), 2),
+            'target_3_status': target_3_status,
+            'direction': direction
+        }
+        
+        print(f"[11/11] ✓ Price-Time Forecast calculated")
+        print(f"        Days to pivot: {days_to_pivot}")
+        print(f"        ATR: ${atr_value:.0f}/day, Max move: ${max_expected_move:.0f}")
+        print(f"        Probable range: ${probable_price_low:.0f} - ${probable_price_high:.0f}")
+        print(f"        TP1 ${target_1_price:.0f}: {target_1_status}")
+        print(f"        TP2 ${target_2_price:.0f}: {target_2_status}")
+        print(f"        TP3 ${target_3_price:.0f}: {target_3_status}")
+        sys.stdout.flush()
+        
+        # Extract numeric values for DB
         take_profit_price = round(float(target_1['price']), 2) if target_1 else round(current_price + atr_value * 3, 2)
         stop_loss_price = round(float(invalidation['price']), 2) if invalidation else round(current_price - atr_value * 1.5, 2)
         
@@ -1215,27 +1306,20 @@ async def get_daily_signal():
         response_data = {
             # ==================== CORE FIELDS ====================
             'status': 'success',
-            'version': '4.0.5',
+            'version': '4.0.6',
             'timestamp': datetime.now().isoformat(),
             'signal_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'symbol': 'BTCUSDT',
             'entry_price': round(current_price, 2),
             
             # ==================== DB FIELDS (EXACT TYPES) ====================
-            # These match your PostgreSQL schema exactly
-            
-            # varchar fields
             'signal_type': str(output.get('signal_type', 'WAIT')),
             'enneagram_arrow': str(arrow_type),
             'macd_signal': str(round(output.get('macd', 0), 4)),
             'ichimoku_signal': str(ichimoku['cloud_signal']),
-            
-            # numeric fields
             'take_profit': float(take_profit_price),
             'stop_loss': float(stop_loss_price),
             'rsi_value': round(float(output.get('rsi', 50)), 2),
-            
-            # integer fields
             'confidence': int(output.get('confidence', 0)),
             'confluence_score': int(confirmation_score),
             'active_pivot_id': int(active_pivot['id']) if active_pivot else None,
@@ -1243,17 +1327,11 @@ async def get_daily_signal():
             'price_confluences': int(len(strong_zones)),
             'time_confluences': int(len(time_windows)),
             'gann_cycle_target': int(time_windows[0]['cycle_length']) if time_windows else 30,
-
-            
-            # text fields (JSON strings)
             'gann_sq9_levels': json.dumps(gann_sq9_levels_db),
             'gann_angles_active': json.dumps(gann_angles_active_db),
             'confluence_details': json.dumps(confluence_details_db),
             
             # ==================== EXTENDED DATA (for Telegram) ====================
-            # These are NOT saved to DB but used for Telegram messages
-            
-            # Enneagram details
             'state': enneagram_state,
             'state_name': state_info['name'],
             'phase': state_info['phase'],
@@ -1262,7 +1340,6 @@ async def get_daily_signal():
             'target_state_name': target_info['name'],
             'arrow': arrow_type,
             
-            # Direction
             'price_direction': price_direction_data['price_direction'],
             'direction_emoji': price_direction_data['direction_emoji'],
             'direction_probability': price_direction_data['direction_probability'],
@@ -1271,7 +1348,6 @@ async def get_daily_signal():
             'bearish_signals_count': price_direction_data['bearish_signals_count'],
             'market_regime': market_regime,
             
-            # Gann Eighths
             'major_high': major_pivots['major_high'],
             'major_low': major_pivots['major_low'],
             'gann_range': major_pivots['range'],
@@ -1280,7 +1356,6 @@ async def get_daily_signal():
             'gann_4_8': gann_eighths['4/8']['price'],
             'gann_5_8': gann_eighths['5/8']['price'],
             
-            # Ichimoku
             'tenkan': ichimoku['tenkan'],
             'kijun': ichimoku['kijun'],
             'cloud_top': ichimoku['cloud_top'],
@@ -1289,21 +1364,19 @@ async def get_daily_signal():
             'tk_cross': ichimoku['tk_cross'],
             'kijun_flat': ichimoku['kijun_flat'],
             
-            # Confluence zones (for Telegram)
             'confluence_zones': confluence_zones[:10],
             'strong_confluence_zones': strong_zones[:5],
             'key_zones': key_zones,
             
-            # Targets with zone details (for Telegram display)
             'take_profit_zone': target_1,
             'stop_loss_zone': invalidation,
             'target_1': target_1,
             'target_2': target_2,
             'target_3': target_3,
             
-            # Time windows (for Telegram)
             'gann_time_windows': time_windows,
             'pivot_forecast_primary': primary_pivot,
+            'price_time_forecast': price_time_forecast,
             'active_pivot': {
                 'id': active_pivot['id'] if active_pivot else None,
                 'price': active_pivot['price'] if active_pivot else None,
@@ -1311,35 +1384,33 @@ async def get_daily_signal():
                 'date': str(active_pivot['date']) if active_pivot else None
             } if active_pivot else None,
             
-            # Confirmation (for Telegram)
             'confirmation_score_display': confirmation_score,
             'score_breakdown': score_breakdown,
             'signal_strength': signal_strength,
             'strength_emoji': strength_emoji,
             'position_advice': position_advice,
             
-            # Original signals (for Telegram)
             'signals_list': output.get('signals', []),
             'signal_count': output.get('signal_count', 0),
             
-            # Indicators (for Telegram)
             'adx_value': round(float(df['adx'].iloc[idx]), 2) if 'adx' in df.columns else 20.0,
             'macd_value': round(output.get('macd', 0), 4),
             'volume_ratio': round(output.get('volume_ratio', 1), 2),
             'atr': round(atr_value, 2),
             
-            # Metadata
             'candles_analyzed': len(df),
             'last_candle_date': str(df['date'].iloc[-1].date())
         }
         
         print("\n" + "="*80)
-        print("[SUCCESS] INVINCIBLE SIGNAL GENERATED v4.0.5")
+        print("[SUCCESS] INVINCIBLE SIGNAL GENERATED v4.0.6")
         print(f"State: {enneagram_state} → {target_state} ({state_info['name']} to {target_info['name']})")
         print(f"Direction: {price_direction_data['price_direction']} {price_direction_data['direction_probability']}%")
         print(f"Confirmation: {confirmation_score}% ({signal_strength})")
-        print(f"Target 1: ${take_profit_price:.2f}")
+        print(f"Target 1: ${take_profit_price:.2f} - {target_1_status}")
         print(f"Invalidation: ${stop_loss_price:.2f}")
+        print(f"Pivot: {primary_pivot['date_display']} ({days_to_pivot} days)")
+        print(f"Range by pivot: ${probable_price_low:.0f} - ${probable_price_high:.0f}")
         print("="*80 + "\n")
         sys.stdout.flush()
         
@@ -1358,7 +1429,7 @@ async def health_check():
     return {
         'status': 'healthy',
         'service': 'LUXOR V7 PRANA Runtime',
-        'version': '4.0.5',
+        'version': '4.0.6',
         'edition': 'INVINCIBLE',
         'timestamp': datetime.now().isoformat()
     }
@@ -1368,8 +1439,8 @@ async def health_check():
 async def startup_event():
     """Startup event handler."""
     print("\n" + "="*80)
-    print("  LUXOR V7 PRANA RUNTIME - INVINCIBLE EDITION v4.0.5")
-    print("  Enneagram-Gann Integration System with Price Confluence")
+    print("  LUXOR V7 PRANA RUNTIME - INVINCIBLE EDITION v4.0.6")
+    print("  Enneagram-Gann Integration System with Price-Time Forecast")
     print("  DB Schema Compatible - All Field Types Matched")
     print("="*80)
     print(f"  Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
