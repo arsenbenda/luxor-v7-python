@@ -12,7 +12,7 @@ import pandas as pd
 
 app = FastAPI(
     title="LUXOR V7 PRANA Runtime",
-    version="4.0.0",
+    version="4.0.1",
     description="Enneagram-Gann Integration System - INVINCIBLE Edition with Price Confluence"
 )
 
@@ -21,36 +21,56 @@ luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 
 
 # ============================================================================
+# JSON SERIALIZATION HELPER - Fix numpy types
+# ============================================================================
+
+def sanitize_for_json(obj):
+    """
+    Recursively convert numpy types to native Python types for JSON serialization.
+    Fixes: TypeError: 'numpy.bool_' object is not iterable
+    """
+    if obj is None:
+        return None
+    elif isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(sanitize_for_json(item) for item in obj)
+    elif isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (pd.Timestamp,)):
+        return obj.isoformat()
+    elif isinstance(obj, pd.Series):
+        return obj.tolist()
+    elif hasattr(obj, 'item'):  # Generic numpy scalar
+        try:
+            return obj.item()
+        except:
+            return str(obj)
+    else:
+        return obj
+
+
+# ============================================================================
 # ENNEAGRAM-GANN SYSTEM CONSTANTS
 # ============================================================================
 
-# Enneagram Point Angular Positions (degrees on the circle)
 ENNEAGRAM_ANGLES = {
-    1: 0,    # Initiation
-    4: 40,   # Retracement
-    2: 80,   # Early Distribution
-    8: 120,  # Strong Markup
-    5: 160,  # Deep Correction
-    7: 200,  # Expansion
-    9: 240,  # Equilibrium (Triangle)
-    6: 280,  # Decision (Triangle)
-    3: 320   # Completion (Triangle)
+    1: 0, 4: 40, 2: 80, 8: 120, 5: 160, 7: 200, 9: 240, 6: 280, 3: 320
 }
 
-# Transition Arrows Matrix
 TRANSITION_ARROWS = {
-    1: (4, 7),   # 1 → 4 (stress/bearish), 1 → 7 (growth/bullish)
-    2: (8, 4),   # 2 → 8 (stress), 2 → 4 (growth)
-    3: (9, 6),   # 3 → 9 (stress), 3 → 6 (growth)
-    4: (2, 1),   # 4 → 2 (stress), 4 → 1 (growth)
-    5: (7, 8),   # 5 → 7 (stress), 5 → 8 (growth/BULLISH - major opportunity)
-    6: (3, 9),   # 6 → 3 (stress), 6 → 9 (growth)
-    7: (1, 5),   # 7 → 1 (stress), 7 → 5 (growth)
-    8: (5, 2),   # 8 → 5 (stress/BEARISH - major correction), 8 → 2 (growth)
-    9: (6, 3)    # 9 → 6 (stress), 9 → 3 (growth)
+    1: (4, 7), 2: (8, 4), 3: (9, 6), 4: (2, 1), 5: (7, 8),
+    6: (3, 9), 7: (1, 5), 8: (5, 2), 9: (6, 3)
 }
 
-# Transition Directional Bias
 TRANSITION_DIRECTION = {
     (1, 7): True, (2, 4): False, (3, 6): False, (4, 1): True,
     (5, 8): True, (6, 9): True, (7, 5): False, (8, 2): True,
@@ -59,7 +79,6 @@ TRANSITION_DIRECTION = {
     (8, 5): False, (9, 6): False
 }
 
-# Gann Time Cycles
 GANN_CYCLES = {
     'minor': [7, 14, 21],
     'intermediate': [30, 45, 60, 90],
@@ -71,26 +90,16 @@ CYCLE_TOLERANCE = {
     90: 3, 120: 4, 144: 4, 180: 5, 270: 6, 360: 7
 }
 
-# Gann Rule of Eighths - Division levels
 GANN_EIGHTHS = {
-    '0/8': 0.000,      # Major Low (100% retracement)
-    '1/8': 0.125,      # Weak support/resistance
-    '2/8': 0.250,      # Important - 25% level
-    '3/8': 0.375,      # Strong S/R - First major retracement
-    '4/8': 0.500,      # CRITICAL - 50% level (most important)
-    '5/8': 0.625,      # Strong S/R - Golden zone
-    '6/8': 0.750,      # Important - 75% level
-    '7/8': 0.875,      # Weak support/resistance
-    '8/8': 1.000       # Major High (0% retracement)
+    '0/8': 0.000, '1/8': 0.125, '2/8': 0.250, '3/8': 0.375,
+    '4/8': 0.500, '5/8': 0.625, '6/8': 0.750, '7/8': 0.875, '8/8': 1.000
 }
 
-# Importance weights for each eighth
 EIGHTHS_IMPORTANCE = {
     '0/8': 100, '1/8': 40, '2/8': 70, '3/8': 85,
     '4/8': 100, '5/8': 85, '6/8': 70, '7/8': 40, '8/8': 100
 }
 
-# Market State Definitions
 MARKET_STATES = {
     1: {'name': 'Initiation', 'phase': 'Early accumulation / new up-cycle start', 'bias': 'bullish_early'},
     2: {'name': 'Early Distribution', 'phase': 'Early distribution / topping process', 'bias': 'bearish_early'},
@@ -105,30 +114,23 @@ MARKET_STATES = {
 
 
 # ============================================================================
-# GANN RULE OF EIGHTHS - Price Structure Analysis
+# GANN RULE OF EIGHTHS
 # ============================================================================
 
 def calculate_gann_eighths(major_high, major_low):
-    """
-    Calculate Gann's Rule of Eighths levels from major high to major low.
-    
-    The range is divided into 8 equal parts creating 9 levels:
-    - 0/8 (0%) = Major Low
-    - 4/8 (50%) = Most important equilibrium
-    - 8/8 (100%) = Major High
-    
-    Key levels: 3/8, 4/8, 5/8 are the most significant for reversals
-    """
+    """Calculate Gann's Rule of Eighths levels."""
+    major_high = float(major_high)
+    major_low = float(major_low)
     range_size = major_high - major_low
     
     eighths_levels = {}
     for name, ratio in GANN_EIGHTHS.items():
         price = major_low + (range_size * ratio)
         eighths_levels[name] = {
-            'price': round(price, 2),
-            'ratio': ratio,
+            'price': round(float(price), 2),
+            'ratio': float(ratio),
             'percentage': f"{ratio * 100:.1f}%",
-            'importance': EIGHTHS_IMPORTANCE[name],
+            'importance': int(EIGHTHS_IMPORTANCE[name]),
             'type': 'RESISTANCE' if ratio > 0.5 else 'SUPPORT' if ratio < 0.5 else 'EQUILIBRIUM'
         }
     
@@ -136,71 +138,37 @@ def calculate_gann_eighths(major_high, major_low):
 
 
 def find_major_pivots(df, lookback=252):
-    """
-    Find major high and low for Gann Eighths calculation.
-    Uses 52-week (252 trading days) or available data.
-    """
+    """Find major high and low for Gann Eighths calculation."""
     lookback = min(lookback, len(df) - 1)
     recent_data = df.iloc[-lookback:]
     
-    major_high = recent_data['high'].max()
-    major_low = recent_data['low'].min()
-    
-    high_idx = recent_data['high'].idxmax()
-    low_idx = recent_data['low'].idxmin()
-    
-    high_date = df.loc[high_idx, 'date'] if high_idx in df.index else None
-    low_date = df.loc[low_idx, 'date'] if low_idx in df.index else None
+    major_high = float(recent_data['high'].max())
+    major_low = float(recent_data['low'].min())
     
     return {
         'major_high': major_high,
         'major_low': major_low,
-        'high_date': high_date,
-        'low_date': low_date,
-        'range': major_high - major_low,
-        'lookback_days': lookback
+        'range': float(major_high - major_low),
+        'lookback_days': int(lookback)
     }
 
 
 # ============================================================================
-# ICHIMOKU CLOUD - Complete Implementation
+# ICHIMOKU CLOUD
 # ============================================================================
 
 def calculate_ichimoku(df):
-    """
-    Calculate complete Ichimoku Cloud components:
-    
-    - Tenkan-sen (Conversion Line): 9-period midpoint - SHORT-TERM equilibrium
-    - Kijun-sen (Base Line): 26-period midpoint - MEDIUM-TERM equilibrium
-    - Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, shifted 26 periods ahead
-    - Senkou Span B (Leading Span B): 52-period midpoint, shifted 26 periods ahead
-    - Chikou Span (Lagging Span): Close shifted 26 periods back
-    
-    Cloud (Kumo): Area between Senkou A and Senkou B
-    """
+    """Calculate complete Ichimoku Cloud components."""
     high = df['high']
     low = df['low']
     close = df['close']
     
-    # Tenkan-sen (9-period)
     tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
-    
-    # Kijun-sen (26-period)
     kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
-    
-    # Senkou Span A (shifted 26 periods forward)
     senkou_a = ((tenkan + kijun) / 2).shift(26)
-    
-    # Senkou Span B (52-period, shifted 26 forward)
     senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
-    
-    # Chikou Span (close shifted 26 back)
     chikou = close.shift(-26)
-    
-    # Cloud thickness (for strength assessment)
     cloud_thickness = abs(senkou_a - senkou_b)
-    
-    # Cloud color (bullish if A > B)
     cloud_bullish = senkou_a > senkou_b
     
     return {
@@ -215,32 +183,24 @@ def calculate_ichimoku(df):
 
 
 def get_ichimoku_levels(df, idx):
-    """
-    Get current Ichimoku levels and signals for confluence analysis.
-    """
+    """Get current Ichimoku levels and signals."""
     ichi = calculate_ichimoku(df)
     
-    current_price = df['close'].iloc[idx]
+    current_price = float(df['close'].iloc[idx])
     
-    # Current values
-    tenkan_val = ichi['tenkan'].iloc[idx] if not pd.isna(ichi['tenkan'].iloc[idx]) else current_price
-    kijun_val = ichi['kijun'].iloc[idx] if not pd.isna(ichi['kijun'].iloc[idx]) else current_price
+    tenkan_val = float(ichi['tenkan'].iloc[idx]) if not pd.isna(ichi['tenkan'].iloc[idx]) else current_price
+    kijun_val = float(ichi['kijun'].iloc[idx]) if not pd.isna(ichi['kijun'].iloc[idx]) else current_price
+    senkou_a_val = float(ichi['senkou_a'].iloc[idx]) if not pd.isna(ichi['senkou_a'].iloc[idx]) else current_price
+    senkou_b_val = float(ichi['senkou_b'].iloc[idx]) if not pd.isna(ichi['senkou_b'].iloc[idx]) else current_price
     
-    # For Senkou, we need to look at current cloud (which was calculated 26 bars ago)
-    senkou_a_val = ichi['senkou_a'].iloc[idx] if not pd.isna(ichi['senkou_a'].iloc[idx]) else current_price
-    senkou_b_val = ichi['senkou_b'].iloc[idx] if not pd.isna(ichi['senkou_b'].iloc[idx]) else current_price
+    future_senkou_a = float((ichi['tenkan'].iloc[idx] + ichi['kijun'].iloc[idx]) / 2) if not pd.isna(ichi['tenkan'].iloc[idx]) else current_price
+    high_52 = float(df['high'].iloc[max(0, idx-51):idx+1].max())
+    low_52 = float(df['low'].iloc[max(0, idx-51):idx+1].min())
+    future_senkou_b = float((high_52 + low_52) / 2)
     
-    # Future cloud (26 bars ahead projection) - use current calculation without shift
-    future_senkou_a = ((ichi['tenkan'].iloc[idx] + ichi['kijun'].iloc[idx]) / 2) if not pd.isna(ichi['tenkan'].iloc[idx]) else current_price
-    high_52 = df['high'].iloc[max(0, idx-51):idx+1].max()
-    low_52 = df['low'].iloc[max(0, idx-51):idx+1].min()
-    future_senkou_b = (high_52 + low_52) / 2
+    cloud_top = float(max(senkou_a_val, senkou_b_val))
+    cloud_bottom = float(min(senkou_a_val, senkou_b_val))
     
-    # Cloud boundaries
-    cloud_top = max(senkou_a_val, senkou_b_val)
-    cloud_bottom = min(senkou_a_val, senkou_b_val)
-    
-    # Price position relative to cloud
     if current_price > cloud_top:
         price_position = 'ABOVE_CLOUD'
         cloud_signal = 'BULLISH'
@@ -251,7 +211,6 @@ def get_ichimoku_levels(df, idx):
         price_position = 'INSIDE_CLOUD'
         cloud_signal = 'NEUTRAL'
     
-    # TK Cross signal
     if tenkan_val > kijun_val:
         tk_cross = 'BULLISH'
     elif tenkan_val < kijun_val:
@@ -259,10 +218,8 @@ def get_ichimoku_levels(df, idx):
     else:
         tk_cross = 'NEUTRAL'
     
-    # Determine key S/R levels from Ichimoku
     ichi_levels = []
     
-    # Tenkan as immediate S/R
     ichi_levels.append({
         'name': 'Tenkan-sen',
         'price': round(tenkan_val, 2),
@@ -271,7 +228,6 @@ def get_ichimoku_levels(df, idx):
         'description': 'Short-term equilibrium (9-period)'
     })
     
-    # Kijun as strong S/R
     ichi_levels.append({
         'name': 'Kijun-sen',
         'price': round(kijun_val, 2),
@@ -280,7 +236,6 @@ def get_ichimoku_levels(df, idx):
         'description': 'Medium-term equilibrium (26-period)'
     })
     
-    # Cloud top
     ichi_levels.append({
         'name': 'Cloud Top (Senkou)',
         'price': round(cloud_top, 2),
@@ -289,7 +244,6 @@ def get_ichimoku_levels(df, idx):
         'description': 'Upper cloud boundary'
     })
     
-    # Cloud bottom
     ichi_levels.append({
         'name': 'Cloud Bottom (Senkou)',
         'price': round(cloud_bottom, 2),
@@ -298,12 +252,10 @@ def get_ichimoku_levels(df, idx):
         'description': 'Lower cloud boundary'
     })
     
-    # Flat Kijun/Senkou B levels (these act as magnets)
-    # Check if Kijun is flat (hasn't changed much in 5 bars)
     kijun_flat = False
     if idx >= 5:
-        kijun_range = ichi['kijun'].iloc[idx-5:idx+1].max() - ichi['kijun'].iloc[idx-5:idx+1].min()
-        if kijun_range < current_price * 0.005:  # Less than 0.5% movement
+        kijun_range = float(ichi['kijun'].iloc[idx-5:idx+1].max() - ichi['kijun'].iloc[idx-5:idx+1].min())
+        if kijun_range < current_price * 0.005:
             kijun_flat = True
             ichi_levels.append({
                 'name': 'Flat Kijun (Magnet)',
@@ -322,28 +274,23 @@ def get_ichimoku_levels(df, idx):
         'cloud_bottom': round(cloud_bottom, 2),
         'future_senkou_a': round(future_senkou_a, 2),
         'future_senkou_b': round(future_senkou_b, 2),
-        'cloud_thickness': round(abs(senkou_a_val - senkou_b_val), 2),
-        'cloud_bullish': senkou_a_val > senkou_b_val,
+        'cloud_thickness': round(float(abs(senkou_a_val - senkou_b_val)), 2),
+        'cloud_bullish': bool(senkou_a_val > senkou_b_val),
         'price_position': price_position,
         'cloud_signal': cloud_signal,
         'tk_cross': tk_cross,
-        'kijun_flat': kijun_flat,
+        'kijun_flat': bool(kijun_flat),
         'levels': ichi_levels
     }
 
 
 # ============================================================================
-# SQUARE OF 9 - Enhanced Implementation
+# SQUARE OF 9
 # ============================================================================
 
 def calculate_square_of_9_levels(price, direction='both', angles=[45, 90, 135, 180, 225, 270, 315, 360]):
-    """
-    Calculate Square of 9 price projections.
-    
-    Formulas:
-    - Upward: (√price + angle/180)²
-    - Downward: (√price - angle/180)²
-    """
+    """Calculate Square of 9 price projections."""
+    price = float(price)
     sqrt_price = math.sqrt(price)
     sq9_levels = []
     
@@ -352,11 +299,11 @@ def calculate_square_of_9_levels(price, direction='both', angles=[45, 90, 135, 1
             target_up = (sqrt_price + angle / 180) ** 2
             distance_pct = ((target_up - price) / price) * 100
             sq9_levels.append({
-                'angle': angle,
+                'angle': int(angle),
                 'direction': 'UP',
-                'price': round(target_up, 2),
+                'price': round(float(target_up), 2),
                 'type': 'RESISTANCE',
-                'distance_pct': round(distance_pct, 2),
+                'distance_pct': round(float(distance_pct), 2),
                 'strength': 70 + (10 if angle in [90, 180, 270, 360] else 0)
             })
         
@@ -365,11 +312,11 @@ def calculate_square_of_9_levels(price, direction='both', angles=[45, 90, 135, 1
             if target_down > 0:
                 distance_pct = ((target_down - price) / price) * 100
                 sq9_levels.append({
-                    'angle': angle,
+                    'angle': int(angle),
                     'direction': 'DOWN',
-                    'price': round(target_down, 2),
+                    'price': round(float(target_down), 2),
                     'type': 'SUPPORT',
-                    'distance_pct': round(distance_pct, 2),
+                    'distance_pct': round(float(distance_pct), 2),
                     'strength': 70 + (10 if angle in [90, 180, 270, 360] else 0)
                 })
     
@@ -377,58 +324,43 @@ def calculate_square_of_9_levels(price, direction='both', angles=[45, 90, 135, 1
 
 
 # ============================================================================
-# CONFLUENCE ZONE DETECTION - The Secret Weapon
+# CONFLUENCE ZONE DETECTION
 # ============================================================================
 
 def find_confluence_zones(current_price, gann_eighths, ichimoku_levels, sq9_levels, tolerance_pct=1.0):
-    """
-    Find price zones where multiple systems agree.
-    
-    A confluence zone is created when 2+ systems have levels within tolerance_pct of each other.
-    
-    Scoring:
-    - Gann Eighths: Base importance (40-100)
-    - Ichimoku: Strength (60-90)
-    - Square of 9: Strength (70-80)
-    
-    Final zone strength = sum of individual strengths + bonus for # of confluences
-    """
+    """Find price zones where multiple systems agree."""
+    current_price = float(current_price)
     all_levels = []
     
-    # Add Gann Eighths
     for name, data in gann_eighths.items():
         all_levels.append({
             'source': 'GANN_EIGHTHS',
             'name': f"Gann {name}",
-            'price': data['price'],
-            'strength': data['importance'],
+            'price': float(data['price']),
+            'strength': int(data['importance']),
             'type': data['type']
         })
     
-    # Add Ichimoku levels
     for level in ichimoku_levels['levels']:
         all_levels.append({
             'source': 'ICHIMOKU',
             'name': level['name'],
-            'price': level['price'],
-            'strength': level['strength'],
+            'price': float(level['price']),
+            'strength': int(level['strength']),
             'type': level['type']
         })
     
-    # Add Square of 9 levels
     for level in sq9_levels:
         all_levels.append({
             'source': 'SQUARE_OF_9',
             'name': f"Sq9 {level['angle']}° {level['direction']}",
-            'price': level['price'],
-            'strength': level['strength'],
+            'price': float(level['price']),
+            'strength': int(level['strength']),
             'type': level['type']
         })
     
-    # Sort by price
     all_levels.sort(key=lambda x: x['price'])
     
-    # Find confluences
     confluence_zones = []
     used_indices = set()
     
@@ -440,31 +372,25 @@ def find_confluence_zones(current_price, gann_eighths, ichimoku_levels, sq9_leve
         zone_price = level['price']
         tolerance = zone_price * (tolerance_pct / 100)
         
-        # Find nearby levels
         for j, other_level in enumerate(all_levels):
             if j != i and j not in used_indices:
                 if abs(other_level['price'] - zone_price) <= tolerance:
                     zone_levels.append(other_level)
                     used_indices.add(j)
         
-        if len(zone_levels) >= 2:  # Confluence requires at least 2 agreeing systems
+        if len(zone_levels) >= 2:
             used_indices.add(i)
             
-            # Calculate zone properties
             prices = [l['price'] for l in zone_levels]
             avg_price = sum(prices) / len(prices)
-            
-            # Count unique sources
             sources = set(l['source'] for l in zone_levels)
             
-            # Calculate strength
             base_strength = sum(l['strength'] for l in zone_levels)
-            confluence_bonus = (len(zone_levels) - 1) * 15  # Bonus for each additional confluence
-            source_bonus = (len(sources) - 1) * 20  # Bonus for different systems agreeing
+            confluence_bonus = (len(zone_levels) - 1) * 15
+            source_bonus = (len(sources) - 1) * 20
             
             total_strength = min(100, (base_strength / len(zone_levels)) + confluence_bonus + source_bonus)
             
-            # Determine zone type
             types = [l['type'] for l in zone_levels]
             if types.count('SUPPORT') > types.count('RESISTANCE'):
                 zone_type = 'SUPPORT'
@@ -473,44 +399,35 @@ def find_confluence_zones(current_price, gann_eighths, ichimoku_levels, sq9_leve
             else:
                 zone_type = 'PIVOT'
             
-            # Distance from current price
             distance_pct = ((avg_price - current_price) / current_price) * 100
             
             confluence_zones.append({
-                'price_low': round(min(prices), 2),
-                'price_high': round(max(prices), 2),
-                'price_avg': round(avg_price, 2),
+                'price_low': round(float(min(prices)), 2),
+                'price_high': round(float(max(prices)), 2),
+                'price_avg': round(float(avg_price), 2),
                 'type': zone_type,
-                'strength': round(total_strength, 1),
-                'num_confluences': len(zone_levels),
+                'strength': round(float(total_strength), 1),
+                'num_confluences': int(len(zone_levels)),
                 'sources': list(sources),
-                'levels': [{'source': l['source'], 'name': l['name'], 'price': l['price']} for l in zone_levels],
-                'distance_pct': round(distance_pct, 2),
-                'is_nearby': abs(distance_pct) <= 3  # Within 3% of current price
+                'levels': [{'source': l['source'], 'name': l['name'], 'price': float(l['price'])} for l in zone_levels],
+                'distance_pct': round(float(distance_pct), 2),
+                'is_nearby': bool(abs(distance_pct) <= 3)
             })
     
-    # Sort by strength (strongest first)
     confluence_zones.sort(key=lambda x: x['strength'], reverse=True)
     
     return confluence_zones
 
 
 def identify_key_zones(confluence_zones, current_price, direction):
-    """
-    Identify the most important zones for the expected move direction.
+    """Identify the most important zones for the expected move direction."""
+    current_price = float(current_price)
     
-    Returns:
-    - Immediate target (first major zone in direction of move)
-    - Major target (strongest zone in direction)
-    - Key support (if bullish) or resistance (if bearish)
-    - Invalidation level
-    """
     supports = [z for z in confluence_zones if z['price_avg'] < current_price]
     resistances = [z for z in confluence_zones if z['price_avg'] > current_price]
     
-    # Sort by distance from current price
-    supports.sort(key=lambda x: x['price_avg'], reverse=True)  # Nearest first
-    resistances.sort(key=lambda x: x['price_avg'])  # Nearest first
+    supports.sort(key=lambda x: x['price_avg'], reverse=True)
+    resistances.sort(key=lambda x: x['price_avg'])
     
     key_zones = {
         'immediate_support': supports[0] if supports else None,
@@ -538,7 +455,7 @@ def identify_key_zones(confluence_zones, current_price, direction):
 # ============================================================================
 
 def calculate_adx(df, period=14):
-    """Calculate ADX (Average Directional Index)"""
+    """Calculate ADX (Average Directional Index)."""
     try:
         high = df['high'].values
         low = df['low'].values
@@ -561,7 +478,6 @@ def calculate_adx(df, period=14):
                 abs(low[i] - close[i-1])
             )
         
-        # Smoothed averages
         atr = pd.Series(tr).rolling(period).mean()
         plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / (atr + 1e-10)
         minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / (atr + 1e-10)
@@ -572,7 +488,7 @@ def calculate_adx(df, period=14):
         return adx.fillna(20)
     except Exception as e:
         print(f"[WARNING] ADX calculation error: {e}")
-        return pd.Series([20] * len(df))
+        return pd.Series([20.0] * len(df))
 
 
 # ============================================================================
@@ -580,29 +496,24 @@ def calculate_adx(df, period=14):
 # ============================================================================
 
 def identify_enneagram_state(df, idx):
-    """
-    Identify current Enneagram market state based on ADX, RSI, Volume criteria.
-    """
+    """Identify current Enneagram market state."""
     try:
         if idx < 50:
             return 9, 50, {}
         
         row = df.iloc[idx]
-        rsi = row['rsi']
-        volume_ratio = row['volume_ratio']
-        adx = df['adx'].iloc[idx] if 'adx' in df.columns else 20
+        rsi = float(row['rsi'])
+        volume_ratio = float(row['volume_ratio'])
+        adx = float(df['adx'].iloc[idx]) if 'adx' in df.columns else 20.0
         
-        # Price structure analysis
         recent = df.iloc[max(0, idx-10):idx+1]
-        higher_highs = (recent['high'].diff() > 0).sum() > 5
-        higher_lows = (recent['low'].diff() > 0).sum() > 5
-        lower_highs = (recent['high'].diff() < 0).sum() > 5
-        lower_lows = (recent['low'].diff() < 0).sum() > 5
+        higher_highs = int((recent['high'].diff() > 0).sum()) > 5
+        higher_lows = int((recent['low'].diff() > 0).sum()) > 5
+        lower_highs = int((recent['high'].diff() < 0).sum()) > 5
+        lower_lows = int((recent['low'].diff() < 0).sum()) > 5
         
-        # Score each state
         scores = {}
         
-        # Point 1 - Initiation
         score_1 = 0
         if 0 <= adx <= 25: score_1 += 25
         if 35 <= rsi <= 65: score_1 += 25
@@ -610,7 +521,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio > 1.0: score_1 += 20
         scores[1] = score_1
         
-        # Point 2 - Early Distribution
         score_2 = 0
         if 20 <= adx <= 35: score_2 += 25
         if 50 <= rsi <= 75: score_2 += 25
@@ -618,7 +528,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio > 1.3: score_2 += 20
         scores[2] = score_2
         
-        # Point 3 - Completion
         score_3 = 0
         if adx > 35: score_3 += 25
         if rsi > 70: score_3 += 30
@@ -626,7 +535,6 @@ def identify_enneagram_state(df, idx):
         if higher_highs and rsi > 75: score_3 += 20
         scores[3] = score_3
         
-        # Point 4 - Retracement
         score_4 = 0
         if 15 <= adx <= 35: score_4 += 25
         if 30 <= rsi <= 55: score_4 += 25
@@ -634,7 +542,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio < 1.2: score_4 += 20
         scores[4] = score_4
         
-        # Point 5 - Deep Correction
         score_5 = 0
         if adx < 25: score_5 += 20
         if rsi < 35: score_5 += 35
@@ -642,7 +549,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio > 1.5: score_5 += 20
         scores[5] = score_5
         
-        # Point 6 - Decision
         score_6 = 0
         if 10 <= adx <= 25: score_6 += 30
         if 35 <= rsi <= 55: score_6 += 25
@@ -650,7 +556,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio < 0.9: score_6 += 20
         scores[6] = score_6
         
-        # Point 7 - Expansion
         score_7 = 0
         if 25 <= adx <= 45: score_7 += 25
         if 50 <= rsi <= 70: score_7 += 30
@@ -658,7 +563,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio > 1.1: score_7 += 15
         scores[7] = score_7
         
-        # Point 8 - Strong Markup
         score_8 = 0
         if adx > 35: score_8 += 25
         if rsi > 60: score_8 += 25
@@ -666,7 +570,6 @@ def identify_enneagram_state(df, idx):
         if volume_ratio > 1.5: score_8 += 25
         scores[8] = score_8
         
-        # Point 9 - Equilibrium
         score_9 = 0
         if adx < 20: score_9 += 35
         if 40 <= rsi <= 60: score_9 += 25
@@ -677,7 +580,7 @@ def identify_enneagram_state(df, idx):
         best_state = max(scores, key=scores.get)
         confidence = min(95, scores[best_state])
         
-        return best_state, confidence, {'adx': adx, 'rsi': rsi, 'scores': scores}
+        return int(best_state), int(confidence), {'adx': adx, 'rsi': rsi, 'scores': {k: int(v) for k, v in scores.items()}}
         
     except Exception as e:
         print(f"[ERROR] identify_enneagram_state: {e}")
@@ -693,14 +596,14 @@ def determine_active_arrow(state, df, idx, market_regime):
     stress_target, growth_target = TRANSITION_ARROWS[state]
     
     if idx < 20:
-        return 'growth', growth_target, True, 50
+        return 'growth', int(growth_target), True, 50.0
     
-    recent_close = df['close'].iloc[idx]
-    sma_20 = df['close'].iloc[idx-20:idx].mean()
-    sma_50 = df['close'].iloc[max(0,idx-50):idx].mean() if idx >= 50 else sma_20
+    recent_close = float(df['close'].iloc[idx])
+    sma_20 = float(df['close'].iloc[idx-20:idx].mean())
+    sma_50 = float(df['close'].iloc[max(0,idx-50):idx].mean()) if idx >= 50 else sma_20
     
-    momentum_5 = (df['close'].iloc[idx] - df['close'].iloc[idx-5]) / df['close'].iloc[idx-5] * 100
-    momentum_20 = (df['close'].iloc[idx] - df['close'].iloc[idx-20]) / df['close'].iloc[idx-20] * 100
+    momentum_5 = float((df['close'].iloc[idx] - df['close'].iloc[idx-5]) / df['close'].iloc[idx-5] * 100)
+    momentum_20 = float((df['close'].iloc[idx] - df['close'].iloc[idx-20]) / df['close'].iloc[idx-20] * 100)
     
     bullish_conditions = 0
     bearish_conditions = 0
@@ -720,9 +623,8 @@ def determine_active_arrow(state, df, idx, market_regime):
     if recent_close > sma_50: bullish_conditions += 1
     else: bearish_conditions += 1
     
-    # State-specific logic
     if state == 5: bullish_conditions += 2
-    elif state == 8 and df['rsi'].iloc[idx] > 70: bearish_conditions += 2
+    elif state == 8 and float(df['rsi'].iloc[idx]) > 70: bearish_conditions += 2
     elif state == 3: bearish_conditions += 2
     
     if bullish_conditions > bearish_conditions:
@@ -736,11 +638,11 @@ def determine_active_arrow(state, df, idx, market_regime):
     
     total = bullish_conditions + bearish_conditions
     if arrow == 'growth':
-        confidence = min(90, 50 + (bullish_conditions / max(1, total)) * 40)
+        confidence = min(90.0, 50.0 + (bullish_conditions / max(1, total)) * 40)
     else:
-        confidence = min(90, 50 + (bearish_conditions / max(1, total)) * 40)
+        confidence = min(90.0, 50.0 + (bearish_conditions / max(1, total)) * 40)
     
-    return arrow, target, is_bullish, round(confidence, 1)
+    return arrow, int(target), bool(is_bullish), round(float(confidence), 1)
 
 
 # ============================================================================
@@ -770,15 +672,15 @@ def calculate_gann_time_windows(current_state, target_state, pivot_date, cycles=
         window_end = target_date + timedelta(days=tolerance)
         
         time_windows.append({
-            'cycle_length': cycle_length,
-            'angular_distance': angular_distance,
-            'day_offset': round(day_target, 1),
+            'cycle_length': int(cycle_length),
+            'angular_distance': int(angular_distance),
+            'day_offset': round(float(day_target), 1),
             'target_date': target_date.strftime('%Y-%m-%d'),
             'target_date_display': target_date.strftime('%d/%m/%Y'),
             'window_start': window_start.strftime('%Y-%m-%d'),
             'window_end': window_end.strftime('%Y-%m-%d'),
-            'tolerance_days': tolerance,
-            'days_from_now': (target_date - datetime.now()).days
+            'tolerance_days': int(tolerance),
+            'days_from_now': int((target_date - datetime.now()).days)
         })
     
     return time_windows
@@ -791,53 +693,57 @@ def calculate_gann_time_windows(current_state, target_state, pivot_date, cycles=
 def calculate_active_pivot(df, current_price):
     """Calculate the most significant recent pivot."""
     try:
+        current_price = float(current_price)
         pivots = []
         
         for i in range(2, len(df) - 2):
-            # Swing High
             if (df['high'].iloc[i] > df['high'].iloc[i-1] and 
                 df['high'].iloc[i] > df['high'].iloc[i-2] and
                 df['high'].iloc[i] > df['high'].iloc[i+1] and 
                 df['high'].iloc[i] > df['high'].iloc[i+2]):
                 
-                vol_avg = df['volume'].iloc[max(0,i-5):i].mean()
-                vol_ratio = df['volume'].iloc[i] / vol_avg if vol_avg > 0 else 1
+                vol_avg = float(df['volume'].iloc[max(0,i-5):i].mean())
+                vol_ratio = float(df['volume'].iloc[i]) / vol_avg if vol_avg > 0 else 1.0
                 
                 pivots.append({
-                    'id': i,
-                    'price': df['high'].iloc[i],
+                    'id': int(i),
+                    'price': float(df['high'].iloc[i]),
                     'type': 'HIGH',
                     'date': df['date'].iloc[i],
-                    'distance': abs(df['high'].iloc[i] - current_price),
-                    'volume_ratio': vol_ratio
+                    'distance': float(abs(df['high'].iloc[i] - current_price)),
+                    'volume_ratio': float(vol_ratio)
                 })
             
-            # Swing Low
             if (df['low'].iloc[i] < df['low'].iloc[i-1] and 
                 df['low'].iloc[i] < df['low'].iloc[i-2] and
                 df['low'].iloc[i] < df['low'].iloc[i+1] and 
                 df['low'].iloc[i] < df['low'].iloc[i+2]):
                 
-                vol_avg = df['volume'].iloc[max(0,i-5):i].mean()
-                vol_ratio = df['volume'].iloc[i] / vol_avg if vol_avg > 0 else 1
+                vol_avg = float(df['volume'].iloc[max(0,i-5):i].mean())
+                vol_ratio = float(df['volume'].iloc[i]) / vol_avg if vol_avg > 0 else 1.0
                 
                 pivots.append({
-                    'id': i,
-                    'price': df['low'].iloc[i],
+                    'id': int(i),
+                    'price': float(df['low'].iloc[i]),
                     'type': 'LOW',
                     'date': df['date'].iloc[i],
-                    'distance': abs(df['low'].iloc[i] - current_price),
-                    'volume_ratio': vol_ratio
+                    'distance': float(abs(df['low'].iloc[i] - current_price)),
+                    'volume_ratio': float(vol_ratio)
                 })
         
         if not pivots:
             return None, []
         
-        # Score pivots
         for p in pivots:
-            days_ago = (df['date'].iloc[-1] - p['date']).days if hasattr(p['date'], 'days') else 30
-            p['recency_score'] = max(0, 100 - days_ago)
-            p['combined_score'] = p['volume_ratio'] * 0.4 + p['recency_score'] * 0.6
+            try:
+                if hasattr(p['date'], 'days'):
+                    days_ago = (df['date'].iloc[-1] - p['date']).days
+                else:
+                    days_ago = 30
+            except:
+                days_ago = 30
+            p['recency_score'] = float(max(0, 100 - days_ago))
+            p['combined_score'] = float(p['volume_ratio'] * 0.4 + p['recency_score'] * 0.6)
         
         best_pivot = max(pivots, key=lambda x: x['combined_score'])
         recent_pivots = sorted(pivots, key=lambda x: x['date'], reverse=True)[:10]
@@ -850,39 +756,25 @@ def calculate_active_pivot(df, current_price):
 
 
 # ============================================================================
-# CONFIRMATION SCORE - Enhanced with Confluence
+# CONFIRMATION SCORE
 # ============================================================================
 
 def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows, confluence_zones, ichimoku):
-    """
-    Enhanced confirmation score including confluence analysis.
-    
-    Weights:
-    - Enneagram arrow alignment: 25%
-    - Price action: 15%
-    - Volume pattern: 10%
-    - ADX trend: 10%
-    - RSI zone: 10%
-    - Time window alignment: 10%
-    - Confluence zone strength: 15%
-    - Ichimoku alignment: 5%
-    """
+    """Enhanced confirmation score including confluence analysis."""
     score = 0
     breakdown = {}
     
-    # 1. Enneagram arrow (25%)
     arrow_score = 20 if arrow else 10
-    if (is_bullish and df['close'].iloc[idx] > df['close'].iloc[idx-5]):
+    if (is_bullish and float(df['close'].iloc[idx]) > float(df['close'].iloc[idx-5])):
         arrow_score += 5
-    elif (not is_bullish and df['close'].iloc[idx] < df['close'].iloc[idx-5]):
+    elif (not is_bullish and float(df['close'].iloc[idx]) < float(df['close'].iloc[idx-5])):
         arrow_score += 5
     breakdown['enneagram_arrow'] = min(25, arrow_score)
     score += breakdown['enneagram_arrow']
     
-    # 2. Price action (15%)
     recent = df.iloc[max(0, idx-10):idx+1]
-    higher_highs = (recent['high'].diff() > 0).sum()
-    higher_lows = (recent['low'].diff() > 0).sum()
+    higher_highs = int((recent['high'].diff() > 0).sum())
+    higher_lows = int((recent['low'].diff() > 0).sum())
     
     if is_bullish and higher_highs > 5 and higher_lows > 5:
         breakdown['price_action'] = 15
@@ -892,13 +784,11 @@ def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows,
         breakdown['price_action'] = 8
     score += breakdown['price_action']
     
-    # 3. Volume (10%)
-    vol_ratio = df['volume_ratio'].iloc[idx]
+    vol_ratio = float(df['volume_ratio'].iloc[idx])
     breakdown['volume'] = min(10, int(vol_ratio * 5))
     score += breakdown['volume']
     
-    # 4. ADX (10%)
-    adx = df['adx'].iloc[idx] if 'adx' in df.columns else 20
+    adx = float(df['adx'].iloc[idx]) if 'adx' in df.columns else 20.0
     if 25 <= adx <= 45:
         breakdown['adx'] = 10
     elif 20 <= adx <= 50:
@@ -907,8 +797,7 @@ def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows,
         breakdown['adx'] = 4
     score += breakdown['adx']
     
-    # 5. RSI (10%)
-    rsi = df['rsi'].iloc[idx]
+    rsi = float(df['rsi'].iloc[idx])
     if is_bullish and 40 <= rsi <= 60:
         breakdown['rsi'] = 10
     elif not is_bullish and (rsi > 65 or rsi < 35):
@@ -917,7 +806,6 @@ def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows,
         breakdown['rsi'] = 5
     score += breakdown['rsi']
     
-    # 6. Time window (10%)
     today = datetime.now()
     in_window = False
     for tw in time_windows:
@@ -929,17 +817,14 @@ def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows,
     breakdown['time_window'] = 10 if in_window else 3
     score += breakdown['time_window']
     
-    # 7. Confluence zone strength (15%) - NEW
     nearby_zones = [z for z in confluence_zones if z['is_nearby']]
     if nearby_zones:
         best_zone = max(nearby_zones, key=lambda x: x['strength'])
-        # Higher score if we're near a strong confluence zone
         breakdown['confluence'] = min(15, int(best_zone['strength'] * 0.15))
     else:
         breakdown['confluence'] = 5
     score += breakdown['confluence']
     
-    # 8. Ichimoku alignment (5%) - NEW
     ichi_score = 0
     if is_bullish:
         if ichimoku['cloud_signal'] == 'BULLISH': ichi_score += 2
@@ -952,7 +837,7 @@ def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows,
     breakdown['ichimoku'] = min(5, ichi_score)
     score += breakdown['ichimoku']
     
-    return min(100, score), breakdown
+    return min(100, int(score)), {k: int(v) for k, v in breakdown.items()}
 
 
 def get_signal_recommendation(score):
@@ -974,7 +859,7 @@ async def get_daily_signal():
     """Generate daily LUXOR V7 signal - INVINCIBLE Edition with Price Confluence"""
     try:
         print("\n" + "="*80)
-        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0")
+        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.1")
         print("="*80)
         sys.stdout.flush()
         
@@ -997,7 +882,7 @@ async def get_daily_signal():
         
         df['adx'] = calculate_adx(df)
         idx = len(df) - 1
-        current_price = df['close'].iloc[idx]
+        current_price = float(df['close'].iloc[idx])
         
         print(f"[2/10] ✅ Price: ${current_price:.2f}, RSI: {output['rsi']:.1f}")
         sys.stdout.flush()
@@ -1047,7 +932,7 @@ async def get_daily_signal():
         
         # 8. Determine market regime and arrow
         print("[8/10] Determining direction...")
-        sma_200 = df['close'].rolling(200).mean().iloc[-1]
+        sma_200 = float(df['close'].rolling(200).mean().iloc[-1])
         
         if current_price > sma_200 * 1.02:
             market_regime = 'BULL'
@@ -1085,9 +970,9 @@ async def get_daily_signal():
         key_zones = identify_key_zones(confluence_zones, current_price, direction)
         
         print(f"[9/10] ✅ Time windows and key zones calculated")
-        if key_zones['target_1']:
+        if key_zones.get('target_1'):
             print(f"       Target 1: ${key_zones['target_1']['price_avg']:.2f}")
-        if key_zones['invalidation']:
+        if key_zones.get('invalidation'):
             print(f"       Invalidation: ${key_zones['invalidation']['price_avg']:.2f}")
         sys.stdout.flush()
         
@@ -1113,10 +998,10 @@ async def get_daily_signal():
                     primary_pivot = {
                         'date': tw['target_date'],
                         'date_display': tw['target_date_display'],
-                        'days_from_now': tw['days_from_now'],
-                        'cycle': tw['cycle_length'],
+                        'days_from_now': int(tw['days_from_now']),
+                        'cycle': int(tw['cycle_length']),
                         'expected_pivot': 'HIGH' if is_bullish else 'LOW',
-                        'confidence': arrow_confidence
+                        'confidence': float(arrow_confidence)
                     }
                     break
         
@@ -1124,132 +1009,112 @@ async def get_daily_signal():
         formatted_zones = []
         for z in confluence_zones[:10]:
             formatted_zones.append({
-                'price': z['price_avg'],
+                'price': float(z['price_avg']),
                 'price_range': f"${z['price_low']:.2f} - ${z['price_high']:.2f}",
-                'type': z['type'],
-                'strength': z['strength'],
-                'confluences': z['num_confluences'],
-                'sources': z['sources'],
-                'distance_pct': z['distance_pct'],
-                'is_nearby': z['is_nearby']
+                'type': str(z['type']),
+                'strength': float(z['strength']),
+                'confluences': int(z['num_confluences']),
+                'sources': list(z['sources']),
+                'distance_pct': float(z['distance_pct']),
+                'is_nearby': bool(z['is_nearby'])
             })
         
-        # Format key zones for Telegram
+        # Format key zones
         key_zones_formatted = {}
         for key, zone in key_zones.items():
             if zone:
                 key_zones_formatted[key] = {
-                    'price': zone['price_avg'],
-                    'strength': zone['strength'],
-                    'type': zone['type']
+                    'price': float(zone['price_avg']),
+                    'strength': float(zone['strength']),
+                    'type': str(zone['type'])
                 }
         
         response_data = {
-            # Basic info
             'symbol': 'BTCUSDT',
             'signal_date': now.isoformat() + 'Z',
             'timestamp': now.isoformat(),
-            'last_date': output['last_date'],
-            'candles_analyzed': output['candles_analyzed'],
+            'last_date': str(output['last_date']),
+            'candles_analyzed': int(output['candles_analyzed']),
             
-            # Current price
             'entry_price': float(current_price),
             'atr': float(output['atr']),
             
-            # Enneagram State
-            'enneagram_state': enneagram_state,
-            'enneagram_state_name': state_info['name'],
-            'enneagram_phase': state_info['phase'],
-            'enneagram_state_confidence': state_confidence,
-            'enneagram_arrow': arrow_type,
-            'enneagram_target_state': target_state,
-            'enneagram_target_name': target_info['name'],
+            'enneagram_state': int(enneagram_state),
+            'enneagram_state_name': str(state_info['name']),
+            'enneagram_phase': str(state_info['phase']),
+            'enneagram_state_confidence': int(state_confidence),
+            'enneagram_arrow': str(arrow_type),
+            'enneagram_target_state': int(target_state),
+            'enneagram_target_name': str(target_info['name']),
             
-            # Direction
-            'price_direction': direction,
-            'direction_emoji': direction_emoji,
-            'direction_probability': arrow_confidence,
+            'price_direction': str(direction),
+            'direction_emoji': str(direction_emoji),
+            'direction_probability': float(arrow_confidence),
             'direction_reasoning': f"State {enneagram_state} ({state_info['name']}) → {arrow_type} → State {target_state} ({target_info['name']})",
             
-            # Market Regime
-            'market_regime': market_regime,
+            'market_regime': str(market_regime),
             'sma_200': float(sma_200),
             
-            # Confirmation
-            'confirmation_score': confirmation_score,
-            'signal_strength': signal_strength,
-            'position_advice': position_advice,
-            'strength_emoji': strength_emoji,
+            'confirmation_score': int(confirmation_score),
+            'signal_strength': str(signal_strength),
+            'position_advice': str(position_advice),
+            'strength_emoji': str(strength_emoji),
             'score_breakdown': score_breakdown,
             
-            # Signal
             'signal_type': 'BUY' if is_bullish and confirmation_score >= 50 else 'SELL' if not is_bullish and confirmation_score >= 50 else 'WAIT',
-            'confidence': confirmation_score,
+            'confidence': int(confirmation_score),
             
-            # ===== GANN RULE OF EIGHTHS =====
             'gann_eighths': {
-                'major_high': major_pivots['major_high'],
-                'major_low': major_pivots['major_low'],
-                'range': major_pivots['range'],
-                'levels': {k: v['price'] for k, v in gann_eighths.items()},
-                'current_position': next(
-                    (k for k, v in sorted(gann_eighths.items(), key=lambda x: x[1]['price']) 
-                     if v['price'] > current_price), '8/8'
-                )
+                'major_high': float(major_pivots['major_high']),
+                'major_low': float(major_pivots['major_low']),
+                'range': float(major_pivots['range']),
+                'levels': {k: float(v['price']) for k, v in gann_eighths.items()}
             },
             
-            # ===== ICHIMOKU =====
             'ichimoku': {
-                'tenkan': ichimoku['tenkan'],
-                'kijun': ichimoku['kijun'],
-                'senkou_a': ichimoku['senkou_a'],
-                'senkou_b': ichimoku['senkou_b'],
-                'cloud_top': ichimoku['cloud_top'],
-                'cloud_bottom': ichimoku['cloud_bottom'],
-                'cloud_signal': ichimoku['cloud_signal'],
-                'tk_cross': ichimoku['tk_cross'],
-                'price_position': ichimoku['price_position'],
-                'kijun_flat': ichimoku['kijun_flat']
+                'tenkan': float(ichimoku['tenkan']),
+                'kijun': float(ichimoku['kijun']),
+                'senkou_a': float(ichimoku['senkou_a']),
+                'senkou_b': float(ichimoku['senkou_b']),
+                'cloud_top': float(ichimoku['cloud_top']),
+                'cloud_bottom': float(ichimoku['cloud_bottom']),
+                'cloud_signal': str(ichimoku['cloud_signal']),
+                'tk_cross': str(ichimoku['tk_cross']),
+                'price_position': str(ichimoku['price_position']),
+                'kijun_flat': bool(ichimoku['kijun_flat'])
             },
             
-            # ===== SQUARE OF 9 =====
             'sq9_levels': [
-                {'angle': l['angle'], 'direction': l['direction'], 'price': l['price'], 'distance_pct': l['distance_pct']}
+                {'angle': int(l['angle']), 'direction': str(l['direction']), 'price': float(l['price']), 'distance_pct': float(l['distance_pct'])}
                 for l in sq9_levels[:12]
             ],
             
-            # ===== CONFLUENCE ZONES (THE SECRET WEAPON) =====
             'confluence_zones': formatted_zones,
             'strong_confluence_zones': [z for z in formatted_zones if z['strength'] >= 70],
             'key_zones': key_zones_formatted,
             
-            # Targets based on confluence
             'target_1': key_zones_formatted.get('target_1'),
             'target_2': key_zones_formatted.get('target_2'),
             'target_3': key_zones_formatted.get('target_3'),
             'stop_loss': key_zones_formatted.get('invalidation', {'price': float(output['stop_loss'])}),
             'take_profit': key_zones_formatted.get('target_1', {'price': float(output['take_profit'])}),
             
-            # Time Windows
             'gann_time_windows': time_windows,
             'pivot_forecast_primary': primary_pivot,
             
-            # Technical Indicators
             'rsi_value': float(output['rsi']),
             'macd_signal': float(output['macd']),
             'volume_ratio': float(output['volume_ratio']),
             'adx_value': float(df['adx'].iloc[-1]),
             
-            # Signal counts
-            'bullish_signals_count': sum(1 for s in output['signals'] if s in ['TREND_UP', 'RSI_OVERSOLD', 'RSI_WEAK', 'MACD_BULLISH', 'ICHIMOKU_BULL', 'ABOVE_PIVOT', 'HIGH_VOLUME']),
-            'bearish_signals_count': sum(1 for s in output['signals'] if s in ['RSI_OVERBOUGHT', 'RSI_STRONG', 'MACD_BEARISH', 'ICHIMOKU_BEAR', 'BELOW_PIVOT']),
-            'signals_list': output['signals'],
+            'bullish_signals_count': int(sum(1 for s in output['signals'] if s in ['TREND_UP', 'RSI_OVERSOLD', 'RSI_WEAK', 'MACD_BULLISH', 'ICHIMOKU_BULL', 'ABOVE_PIVOT', 'HIGH_VOLUME'])),
+            'bearish_signals_count': int(sum(1 for s in output['signals'] if s in ['RSI_OVERBOUGHT', 'RSI_STRONG', 'MACD_BEARISH', 'ICHIMOKU_BEAR', 'BELOW_PIVOT'])),
+            'signals_list': list(output['signals']),
             
-            # Legacy compatibility
             'status': 'PENDING',
-            'confluence_score': confirmation_score,
-            'price_confluences': len([z for z in confluence_zones if z['is_nearby']]),
-            'time_confluences': len(time_windows)
+            'confluence_score': int(confirmation_score),
+            'price_confluences': int(len([z for z in confluence_zones if z['is_nearby']])),
+            'time_confluences': int(len(time_windows))
         }
         
         # Final summary
@@ -1277,7 +1142,8 @@ async def get_daily_signal():
         print("="*80 + "\n")
         sys.stdout.flush()
         
-        return response_data
+        # SANITIZE AND RETURN
+        return sanitize_for_json(response_data)
     
     except Exception as e:
         error_msg = f"[ERROR] /signal/daily: {str(e)}"
@@ -1290,10 +1156,10 @@ async def get_daily_signal():
 @app.get("/health")
 async def health():
     """Health check"""
-    return {
+    return sanitize_for_json({
         'status': 'healthy',
         'service': SERVICE_NAME,
-        'version': '4.0.0 INVINCIBLE',
+        'version': '4.0.1 INVINCIBLE',
         'features': [
             'Enneagram-Gann Integration',
             'Rule of Eighths',
@@ -1302,13 +1168,13 @@ async def health():
             'Confluence Zone Detection'
         ],
         'timestamp': datetime.now().isoformat()
-    }
+    })
 
 
 @app.on_event("startup")
 async def startup_event():
     print("\n" + "="*80)
-    print(f"🏆 {SERVICE_NAME} v4.0.0 - INVINCIBLE EDITION")
+    print(f"🏆 {SERVICE_NAME} v4.0.1 - INVINCIBLE EDITION")
     print("="*80)
     print(f"")
     print(f"   ⚡ DIRECTION ENGINE:")
