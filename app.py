@@ -96,12 +96,12 @@ def resample_ohlcv(df, timeframe):
         df_copy['date'] = pd.to_datetime(df_copy['date'])
         df_copy = df_copy.set_index('date')
     
-    # Define resampling rules
+    # Define resampling rules (compatible with pandas 1.x and 2.x)
     resample_map = {
         '1D': '1D',
         '3D': '3D',
         '1W': 'W',
-        '1M': 'ME'  # Month End
+        '1M': 'M'  # Changed from 'ME' to 'M' for pandas 1.x compatibility
     }
     
     if timeframe not in resample_map:
@@ -109,20 +109,25 @@ def resample_ohlcv(df, timeframe):
     
     rule = resample_map[timeframe]
     
-    # OHLC resampling - preserves true price action
-    resampled = df_copy.resample(rule).agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }).dropna()
+    try:
+        # OHLC resampling - preserves true price action
+        resampled = df_copy.resample(rule).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+    except Exception as e:
+        print(f"[WARNING] Resample failed for {timeframe}: {e}")
+        return None
     
     # Reset index to have date as column
     resampled = resampled.reset_index()
     resampled = resampled.rename(columns={'index': 'date'})
     
     return resampled
+
 
 
 def prepare_timeframe_data(df_daily):
