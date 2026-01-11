@@ -1,1454 +1,1696 @@
+"""
+LUXOR V7 PRANA RUNTIME - MULTI-TIMEFRAME EDITION
+Version: 5.0.0
+Complete Gann-aligned multi-timeframe analysis system
+"""
+
 from fastapi import FastAPI, HTTPException
 from datetime import datetime, timedelta
 import uvicorn
-from luxor_v7_prana import LuxorV7PranaSystem
-from config import *
-import traceback
-import sys
-import math
 import json
-import numpy as np
+import math
 import pandas as pd
+import numpy as np
+from luxor_v7_prana import LuxorV7PranaSystem
+from config import INITIAL_CAPITAL, API_HOST, API_PORT
 
-app = FastAPI(
-    title="LUXOR V7 PRANA Runtime",
-    version="4.0.6",
-    description="Enneagram-Gann Integration System - INVINCIBLE Edition with Price-Time Forecast"
-)
+app = FastAPI(title="LUXOR V7 PRANA Runtime", version="5.0.0")
 
-# Initialize once
+# Initialize system
 luxor = LuxorV7PranaSystem(initial_capital=INITIAL_CAPITAL)
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+TIMEFRAME_WEIGHTS = {
+    '1M': 40,
+    '1W': 35,
+    '3D': 15,
+    '1D': 10
+}
+
+ICHIMOKU_PARAMS = {
+    '1D': (9, 26, 52),
+    '3D': (9, 26, 52),
+    '1W': (9, 26, 26),  # Gann-aligned for weekly
+    '1M': (9, 26, 52)
+}
+
+GANN_DAY_CYCLES = [7, 14, 21, 30, 45, 60, 90, 120, 135, 150, 180, 270, 360]
+GANN_WEEK_CYCLES = [13, 26, 39, 52, 78]
+GANN_MONTH_CYCLES = [3, 6, 12, 24]
 
 # ============================================================================
-# JSON SERIALIZATION HELPER - Fix numpy types
+# ENNEAGRAM STATE DEFINITIONS
 # ============================================================================
 
-def sanitize_for_json(obj):
-    """Recursively convert numpy types to native Python types for JSON serialization."""
-    if obj is None:
+ENNEAGRAM_STATES = {
+    1: {"name": "Initiation", "phase": "Early accumulation / new up-cycle start", "stress": 4, "growth": 7, "bias": "BULLISH"},
+    2: {"name": "Acceleration", "phase": "Momentum builds / trend strengthens", "stress": 8, "growth": 4, "bias": "BULLISH"},
+    3: {"name": "Peak Formation", "phase": "Topping pattern emerging", "stress": 9, "growth": 6, "bias": "BEARISH"},
+    4: {"name": "Retracement", "phase": "Healthy pullback / correction", "stress": 2, "growth": 1, "bias": "BEARISH"},
+    5: {"name": "Capitulation", "phase": "Panic selling / washout phase", "stress": 7, "growth": 8, "bias": "BULLISH"},
+    6: {"name": "Accumulation", "phase": "Smart money accumulating / base building", "stress": 3, "growth": 9, "bias": "BULLISH"},
+    7: {"name": "Expansion", "phase": "Breakout / rapid expansion phase", "stress": 1, "growth": 5, "bias": "BULLISH"},
+    8: {"name": "Distribution", "phase": "Late-stage markup / distribution begins", "stress": 5, "growth": 2, "bias": "BEARISH"},
+    9: {"name": "Equilibrium", "phase": "Consolidation / range-bound balance", "stress": 6, "growth": 3, "bias": "NEUTRAL"}
+}
+
+ARROW_MEANINGS = {
+    (1, "STRESS", 4): "Early accumulation interrupted - expect pullback before uptrend resumes",
+    (1, "GROWTH", 7): "Accumulation complete - healthy expansion phase beginning",
+    (2, "STRESS", 8): "Momentum stalling - distribution phase beginning, reduce exposure",
+    (2, "GROWTH", 4): "Momentum maturing - healthy retracement before continuation",
+    (3, "STRESS", 9): "Peak confirmed - consolidation/reversal imminent",
+    (3, "GROWTH", 6): "Peak transitioning - orderly accumulation at lower levels",
+    (4, "STRESS", 2): "Pullback accelerating - may become deeper correction",
+    (4, "GROWTH", 1): "Retracement complete - new uptrend initiating",
+    (5, "STRESS", 7): "Capitulation ending - sharp reversal rally expected",
+    (5, "GROWTH", 8): "Capitulation bottom - strong recovery rally underway",
+    (6, "STRESS", 3): "Accumulation failed - another leg down likely",
+    (6, "GROWTH", 9): "Accumulation successful - equilibrium before breakout",
+    (7, "STRESS", 1): "Expansion exhausted - return to accumulation phase",
+    (7, "GROWTH", 5): "Expansion overheated - expect volatility spike/washout",
+    (8, "STRESS", 5): "Distribution complete - capitulation phase starting",
+    (8, "GROWTH", 2): "Distribution to momentum - trend continuation likely",
+    (9, "STRESS", 6): "Balance broken - accumulation or breakdown ahead",
+    (9, "GROWTH", 3): "Equilibrium ending - peak formation or breakdown"
+}
+
+# ============================================================================
+# DATA RESAMPLING FUNCTIONS
+# ============================================================================
+
+def resample_ohlcv(df, timeframe):
+    """
+    Resample daily OHLCV data to higher timeframes using proper OHLC aggregation.
+    Gann emphasized using true highs/lows within periods.
+    """
+    if df is None or len(df) == 0:
         return None
-    elif isinstance(obj, dict):
-        return {k: sanitize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [sanitize_for_json(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(sanitize_for_json(item) for item in obj)
-    elif isinstance(obj, (np.bool_,)):
-        return bool(obj)
-    elif isinstance(obj, (np.integer,)):
-        return int(obj)
-    elif isinstance(obj, (np.floating,)):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, (pd.Timestamp,)):
-        return obj.isoformat()
-    elif isinstance(obj, pd.Series):
-        return obj.tolist()
-    elif hasattr(obj, 'item'):
-        try:
-            return obj.item()
-        except:
-            return str(obj)
-    else:
-        return obj
-
-
-# ============================================================================
-# ENNEAGRAM-GANN SYSTEM CONSTANTS
-# ============================================================================
-
-ENNEAGRAM_ANGLES = {
-    1: 0, 4: 40, 2: 80, 8: 120, 5: 160, 7: 200, 9: 240, 6: 280, 3: 320
-}
-
-TRANSITION_ARROWS = {
-    1: (4, 7), 2: (8, 4), 3: (9, 6), 4: (2, 1), 5: (7, 8),
-    6: (3, 9), 7: (1, 5), 8: (5, 2), 9: (6, 3)
-}
-
-TRANSITION_DIRECTION = {
-    (1, 7): True, (2, 4): False, (3, 6): False, (4, 1): True,
-    (5, 8): True, (6, 9): True, (7, 5): False, (8, 2): True,
-    (9, 3): True, (1, 4): False, (2, 8): True, (3, 9): False,
-    (4, 2): False, (5, 7): True, (6, 3): True, (7, 1): False,
-    (8, 5): False, (9, 6): False
-}
-
-GANN_CYCLES = {
-    'minor': [7, 14, 21],
-    'intermediate': [30, 45, 60, 90],
-    'major': [120, 144, 180, 270, 360]
-}
-
-CYCLE_TOLERANCE = {
-    7: 1, 14: 1, 21: 2, 30: 2, 45: 3, 60: 3,
-    90: 3, 120: 4, 144: 4, 180: 5, 270: 6, 360: 7
-}
-
-GANN_EIGHTHS = {
-    '0/8': 0.000, '1/8': 0.125, '2/8': 0.250, '3/8': 0.375,
-    '4/8': 0.500, '5/8': 0.625, '6/8': 0.750, '7/8': 0.875, '8/8': 1.000
-}
-
-EIGHTHS_IMPORTANCE = {
-    '0/8': 100, '1/8': 40, '2/8': 70, '3/8': 85,
-    '4/8': 100, '5/8': 85, '6/8': 70, '7/8': 40, '8/8': 100
-}
-
-MARKET_STATES = {
-    1: {'name': 'Initiation', 'phase': 'Early accumulation / new up-cycle start', 'bias': 'bullish_early'},
-    2: {'name': 'Early Distribution', 'phase': 'Early distribution / topping process', 'bias': 'bearish_early'},
-    3: {'name': 'Completion', 'phase': 'Final exhaustion / major top', 'bias': 'reversal_imminent'},
-    4: {'name': 'Retracement', 'phase': 'Pullback / corrective pause', 'bias': 'neutral'},
-    5: {'name': 'Deep Correction', 'phase': 'Capitulation / major low zone', 'bias': 'bullish_opportunity'},
-    6: {'name': 'Decision', 'phase': 'Sideways decision zone / coiling', 'bias': 'breakout_pending'},
-    7: {'name': 'Expansion', 'phase': 'Healthy uptrend / sustained advance', 'bias': 'bullish_trend'},
-    8: {'name': 'Strong Markup', 'phase': 'Late-stage steep markup', 'bias': 'bullish_late_caution'},
-    9: {'name': 'Equilibrium', 'phase': 'Flat equilibrium / low-volatility range', 'bias': 'calm_before_storm'}
-}
-
-
-# ============================================================================
-# GANN RULE OF EIGHTHS
-# ============================================================================
-
-def calculate_gann_eighths(major_high, major_low):
-    """Calculate Gann's Rule of Eighths levels."""
-    major_high = float(major_high)
-    major_low = float(major_low)
-    range_size = major_high - major_low
     
-    eighths_levels = {}
-    for name, ratio in GANN_EIGHTHS.items():
-        price = major_low + (range_size * ratio)
-        eighths_levels[name] = {
-            'price': round(float(price), 2),
-            'ratio': float(ratio),
-            'percentage': f"{ratio * 100:.1f}%",
-            'importance': int(EIGHTHS_IMPORTANCE[name]),
-            'type': 'RESISTANCE' if ratio > 0.5 else 'SUPPORT' if ratio < 0.5 else 'EQUILIBRIUM'
-        }
+    # Ensure we have a datetime index
+    df_copy = df.copy()
+    if 'date' in df_copy.columns:
+        df_copy['date'] = pd.to_datetime(df_copy['date'])
+        df_copy = df_copy.set_index('date')
     
-    return eighths_levels
+    # Define resampling rules
+    resample_map = {
+        '1D': '1D',
+        '3D': '3D',
+        '1W': 'W',
+        '1M': 'ME'  # Month End
+    }
+    
+    if timeframe not in resample_map:
+        return df_copy
+    
+    rule = resample_map[timeframe]
+    
+    # OHLC resampling - preserves true price action
+    resampled = df_copy.resample(rule).agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+    
+    # Reset index to have date as column
+    resampled = resampled.reset_index()
+    resampled = resampled.rename(columns={'index': 'date'})
+    
+    return resampled
 
 
-def find_major_pivots(df, lookback=252):
-    """Find major high and low for Gann Eighths calculation."""
-    lookback = min(lookback, len(df) - 1)
-    recent_data = df.iloc[-lookback:]
+def prepare_timeframe_data(df_daily):
+    """
+    Prepare data for all timeframes from daily data.
+    Returns dict with DataFrames for each timeframe.
+    """
+    timeframes = {}
     
-    major_high = float(recent_data['high'].max())
-    major_low = float(recent_data['low'].min())
+    # Daily - use as-is
+    timeframes['1D'] = df_daily.copy()
+    
+    # 3-Day
+    timeframes['3D'] = resample_ohlcv(df_daily, '3D')
+    
+    # Weekly
+    timeframes['1W'] = resample_ohlcv(df_daily, '1W')
+    
+    # Monthly
+    timeframes['1M'] = resample_ohlcv(df_daily, '1M')
+    
+    return timeframes
+
+
+# ============================================================================
+# INDICATOR CALCULATION FUNCTIONS
+# ============================================================================
+
+def calculate_rsi(df, period=14):
+    """Calculate RSI"""
+    if len(df) < period + 1:
+        return 50.0
+    
+    close = df['close'].values
+    deltas = np.diff(close)
+    
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    
+    avg_gain = np.mean(gains[-period:])
+    avg_loss = np.mean(losses[-period:])
+    
+    if avg_loss == 0:
+        return 100.0
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    return round(rsi, 2)
+
+
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    """Calculate MACD and histogram"""
+    if len(df) < slow + signal:
+        return {'macd': 0, 'signal': 0, 'histogram': 0}
+    
+    close = df['close']
+    
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
     
     return {
-        'major_high': major_high,
-        'major_low': major_low,
-        'range': float(major_high - major_low),
-        'lookback_days': int(lookback)
+        'macd': round(float(macd_line.iloc[-1]), 4),
+        'signal': round(float(signal_line.iloc[-1]), 4),
+        'histogram': round(float(histogram.iloc[-1]), 4)
     }
 
 
-# ============================================================================
-# ICHIMOKU CLOUD
-# ============================================================================
+def calculate_adx(df, period=14):
+    """Calculate ADX for trend strength"""
+    if len(df) < period * 2:
+        return {'adx': 25.0, 'trend_strength': 'MODERATE', 'plus_di': 0, 'minus_di': 0}
+    
+    high = df['high'].values
+    low = df['low'].values
+    close = df['close'].values
+    
+    # True Range
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(abs(high[1:] - close[:-1]), 
+                              abs(low[1:] - close[:-1])))
+    
+    # Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]),
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]),
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # Smoothed averages
+    atr = np.mean(tr[-period:])
+    plus_di = 100 * np.mean(plus_dm[-period:]) / atr if atr > 0 else 0
+    minus_di = 100 * np.mean(minus_dm[-period:]) / atr if atr > 0 else 0
+    
+    # ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
+    adx = dx  # Simplified - would normally smooth
+    
+    # Trend strength classification
+    if adx > 50:
+        trend_strength = "STRONG"
+    elif adx > 25:
+        trend_strength = "MODERATE"
+    else:
+        trend_strength = "WEAK"
+    
+    return {
+        'adx': round(adx, 2),
+        'trend_strength': trend_strength,
+        'plus_di': round(plus_di, 2),
+        'minus_di': round(minus_di, 2)
+    }
 
-def calculate_ichimoku(df):
-    """Calculate complete Ichimoku Cloud components."""
+
+def calculate_atr(df, period=14):
+    """Calculate Average True Range"""
+    if len(df) < period + 1:
+        return float(df['close'].iloc[-1] * 0.025)
+    
+    high = df['high'].values
+    low = df['low'].values
+    close = df['close'].values
+    
+    tr = np.maximum(high[1:] - low[1:],
+                    np.maximum(abs(high[1:] - close[:-1]),
+                              abs(low[1:] - close[:-1])))
+    
+    atr = np.mean(tr[-period:])
+    return round(float(atr), 2)
+
+
+def calculate_sma(df, period=200):
+    """Calculate Simple Moving Average"""
+    if len(df) < period:
+        return float(df['close'].mean())
+    
+    return round(float(df['close'].iloc[-period:].mean()), 2)
+
+
+def calculate_ichimoku(df, tenkan_period=9, kijun_period=26, senkou_period=52):
+    """Calculate Ichimoku Cloud components"""
+    if len(df) < senkou_period:
+        close = float(df['close'].iloc[-1])
+        return {
+            'tenkan': close,
+            'kijun': close,
+            'senkou_a': close,
+            'senkou_b': close,
+            'cloud_top': close,
+            'cloud_bottom': close,
+            'cloud_signal': 'NEUTRAL',
+            'tk_cross': 'NEUTRAL',
+            'price_vs_cloud': 'INSIDE',
+            'kijun_flat': False,
+            'chikou_signal': 'NEUTRAL'
+        }
+    
     high = df['high']
     low = df['low']
     close = df['close']
+    current_price = float(close.iloc[-1])
     
-    tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
-    kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
-    senkou_a = ((tenkan + kijun) / 2).shift(26)
-    senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
-    chikou = close.shift(-26)
-    cloud_thickness = abs(senkou_a - senkou_b)
-    cloud_bullish = senkou_a > senkou_b
+    # Tenkan-sen (Conversion Line)
+    tenkan = (high.iloc[-tenkan_period:].max() + low.iloc[-tenkan_period:].min()) / 2
     
-    return {
-        'tenkan': tenkan,
-        'kijun': kijun,
-        'senkou_a': senkou_a,
-        'senkou_b': senkou_b,
-        'chikou': chikou,
-        'cloud_thickness': cloud_thickness,
-        'cloud_bullish': cloud_bullish
-    }
-
-
-def get_ichimoku_levels(df, idx):
-    """Get current Ichimoku levels and signals."""
-    ichi = calculate_ichimoku(df)
+    # Kijun-sen (Base Line)
+    kijun = (high.iloc[-kijun_period:].max() + low.iloc[-kijun_period:].min()) / 2
     
-    current_price = float(df['close'].iloc[idx])
+    # Senkou Span A (Leading Span A) - projected 26 periods ahead
+    senkou_a = (tenkan + kijun) / 2
     
-    tenkan_val = float(ichi['tenkan'].iloc[idx]) if not pd.isna(ichi['tenkan'].iloc[idx]) else current_price
-    kijun_val = float(ichi['kijun'].iloc[idx]) if not pd.isna(ichi['kijun'].iloc[idx]) else current_price
-    senkou_a_val = float(ichi['senkou_a'].iloc[idx]) if not pd.isna(ichi['senkou_a'].iloc[idx]) else current_price
-    senkou_b_val = float(ichi['senkou_b'].iloc[idx]) if not pd.isna(ichi['senkou_b'].iloc[idx]) else current_price
+    # Senkou Span B (Leading Span B) - projected 26 periods ahead
+    senkou_b = (high.iloc[-senkou_period:].max() + low.iloc[-senkou_period:].min()) / 2
     
-    future_senkou_a = float((ichi['tenkan'].iloc[idx] + ichi['kijun'].iloc[idx]) / 2) if not pd.isna(ichi['tenkan'].iloc[idx]) else current_price
-    high_52 = float(df['high'].iloc[max(0, idx-51):idx+1].max())
-    low_52 = float(df['low'].iloc[max(0, idx-51):idx+1].min())
-    future_senkou_b = float((high_52 + low_52) / 2)
+    cloud_top = max(senkou_a, senkou_b)
+    cloud_bottom = min(senkou_a, senkou_b)
     
-    cloud_top = float(max(senkou_a_val, senkou_b_val))
-    cloud_bottom = float(min(senkou_a_val, senkou_b_val))
-    
+    # Cloud signal
     if current_price > cloud_top:
-        price_position = 'ABOVE_CLOUD'
-        cloud_signal = 'BULLISH'
+        cloud_signal = "BULLISH"
+        price_vs_cloud = "ABOVE"
     elif current_price < cloud_bottom:
-        price_position = 'BELOW_CLOUD'
-        cloud_signal = 'BEARISH'
+        cloud_signal = "BEARISH"
+        price_vs_cloud = "BELOW"
     else:
-        price_position = 'INSIDE_CLOUD'
-        cloud_signal = 'NEUTRAL'
+        cloud_signal = "NEUTRAL"
+        price_vs_cloud = "INSIDE"
     
-    if tenkan_val > kijun_val:
-        tk_cross = 'BULLISH'
-    elif tenkan_val < kijun_val:
-        tk_cross = 'BEARISH'
+    # TK Cross
+    if tenkan > kijun:
+        tk_cross = "BULLISH"
+    elif tenkan < kijun:
+        tk_cross = "BEARISH"
     else:
-        tk_cross = 'NEUTRAL'
+        tk_cross = "NEUTRAL"
     
-    ichi_levels = []
-    
-    ichi_levels.append({
-        'name': 'Tenkan-sen',
-        'price': round(tenkan_val, 2),
-        'type': 'SUPPORT' if current_price > tenkan_val else 'RESISTANCE',
-        'strength': 60,
-        'description': 'Short-term equilibrium (9-period)'
-    })
-    
-    ichi_levels.append({
-        'name': 'Kijun-sen',
-        'price': round(kijun_val, 2),
-        'type': 'SUPPORT' if current_price > kijun_val else 'RESISTANCE',
-        'strength': 80,
-        'description': 'Medium-term equilibrium (26-period)'
-    })
-    
-    ichi_levels.append({
-        'name': 'Cloud Top (Senkou)',
-        'price': round(cloud_top, 2),
-        'type': 'RESISTANCE' if current_price < cloud_top else 'SUPPORT',
-        'strength': 85,
-        'description': 'Upper cloud boundary'
-    })
-    
-    ichi_levels.append({
-        'name': 'Cloud Bottom (Senkou)',
-        'price': round(cloud_bottom, 2),
-        'type': 'SUPPORT' if current_price > cloud_bottom else 'RESISTANCE',
-        'strength': 85,
-        'description': 'Lower cloud boundary'
-    })
-    
+    # Kijun flat detection (price magnet)
     kijun_flat = False
-    if idx >= 5:
-        kijun_range = float(ichi['kijun'].iloc[idx-5:idx+1].max() - ichi['kijun'].iloc[idx-5:idx+1].min())
-        if kijun_range < current_price * 0.005:
-            kijun_flat = True
-            ichi_levels.append({
-                'name': 'Flat Kijun (Magnet)',
-                'price': round(kijun_val, 2),
-                'type': 'MAGNET',
-                'strength': 90,
-                'description': 'Price tends to return to flat Kijun'
-            })
+    if len(df) >= kijun_period + 5:
+        recent_kijun = []
+        for i in range(5):
+            idx = -(i + 1)
+            k = (high.iloc[idx - kijun_period:idx].max() + low.iloc[idx - kijun_period:idx].min()) / 2
+            recent_kijun.append(k)
+        kijun_range = max(recent_kijun) - min(recent_kijun)
+        kijun_flat = kijun_range < (kijun * 0.01)  # Less than 1% variation
+    
+    # Chikou Span signal (lagging)
+    chikou_signal = "NEUTRAL"
+    if len(df) >= 26:
+        chikou_price = float(close.iloc[-1])
+        price_26_ago = float(close.iloc[-26])
+        if chikou_price > price_26_ago:
+            chikou_signal = "BULLISH"
+        elif chikou_price < price_26_ago:
+            chikou_signal = "BEARISH"
     
     return {
-        'tenkan': round(tenkan_val, 2),
-        'kijun': round(kijun_val, 2),
-        'senkou_a': round(senkou_a_val, 2),
-        'senkou_b': round(senkou_b_val, 2),
-        'cloud_top': round(cloud_top, 2),
-        'cloud_bottom': round(cloud_bottom, 2),
-        'future_senkou_a': round(future_senkou_a, 2),
-        'future_senkou_b': round(future_senkou_b, 2),
-        'cloud_thickness': round(float(abs(senkou_a_val - senkou_b_val)), 2),
-        'cloud_bullish': bool(senkou_a_val > senkou_b_val),
-        'price_position': price_position,
+        'tenkan': round(float(tenkan), 2),
+        'kijun': round(float(kijun), 2),
+        'senkou_a': round(float(senkou_a), 2),
+        'senkou_b': round(float(senkou_b), 2),
+        'cloud_top': round(float(cloud_top), 2),
+        'cloud_bottom': round(float(cloud_bottom), 2),
         'cloud_signal': cloud_signal,
         'tk_cross': tk_cross,
-        'kijun_flat': bool(kijun_flat),
-        'levels': ichi_levels
+        'price_vs_cloud': price_vs_cloud,
+        'kijun_flat': kijun_flat,
+        'chikou_signal': chikou_signal
     }
 
 
 # ============================================================================
-# SQUARE OF 9
+# GANN ANALYSIS FUNCTIONS
 # ============================================================================
 
-def calculate_square_of_9_levels(price, direction='both', angles=[45, 90, 135, 180, 225, 270, 315, 360]):
-    """Calculate Square of 9 price projections based on Gann's geometric principles."""
-    price = float(price)
-    sqrt_price = math.sqrt(price)
-    sq9_levels = []
-    
-    for angle in angles:
-        if direction in ['up', 'both']:
-            target_up = (sqrt_price + angle / 180) ** 2
-            distance_pct = ((target_up - price) / price) * 100
-            sq9_levels.append({
-                'angle': int(angle),
-                'direction': 'UP',
-                'price': round(float(target_up), 2),
-                'type': 'RESISTANCE',
-                'distance_pct': round(float(distance_pct), 2),
-                'strength': 70 + (10 if angle in [90, 180, 270, 360] else 0),
-                'active': abs(distance_pct) < 5
-            })
-        
-        if direction in ['down', 'both']:
-            target_down = (sqrt_price - angle / 180) ** 2
-            if target_down > 0:
-                distance_pct = ((target_down - price) / price) * 100
-                sq9_levels.append({
-                    'angle': int(angle),
-                    'direction': 'DOWN',
-                    'price': round(float(target_down), 2),
-                    'type': 'SUPPORT',
-                    'distance_pct': round(float(distance_pct), 2),
-                    'strength': 70 + (10 if angle in [90, 180, 270, 360] else 0),
-                    'active': abs(distance_pct) < 5
-                })
-    
-    return sorted(sq9_levels, key=lambda x: x['price'])
-
-
-# ============================================================================
-# CONFLUENCE ZONE DETECTION
-# ============================================================================
-
-def find_confluence_zones(current_price, gann_eighths, ichimoku_levels, sq9_levels, tolerance_pct=1.0):
-    """Find price zones where multiple systems agree."""
-    current_price = float(current_price)
-    all_levels = []
-    
-    for name, data in gann_eighths.items():
-        all_levels.append({
-            'source': 'GANN_EIGHTHS',
-            'name': f"Gann {name}",
-            'price': float(data['price']),
-            'strength': int(data['importance']),
-            'type': data['type']
-        })
-    
-    for level in ichimoku_levels['levels']:
-        all_levels.append({
-            'source': 'ICHIMOKU',
-            'name': level['name'],
-            'price': float(level['price']),
-            'strength': int(level['strength']),
-            'type': level['type']
-        })
-    
-    for level in sq9_levels:
-        all_levels.append({
-            'source': 'SQUARE_OF_9',
-            'name': f"Sq9 {level['angle']}° {level['direction']}",
-            'price': float(level['price']),
-            'strength': int(level['strength']),
-            'type': level['type']
-        })
-    
-    all_levels.sort(key=lambda x: x['price'])
-    
-    confluence_zones = []
-    used_indices = set()
-    
-    for i, level in enumerate(all_levels):
-        if i in used_indices:
-            continue
-        
-        zone_levels = [level]
-        zone_price = level['price']
-        tolerance = zone_price * (tolerance_pct / 100)
-        
-        for j, other_level in enumerate(all_levels):
-            if j != i and j not in used_indices:
-                if abs(other_level['price'] - zone_price) <= tolerance:
-                    zone_levels.append(other_level)
-                    used_indices.add(j)
-        
-        if len(zone_levels) >= 2:
-            used_indices.add(i)
-            
-            prices = [l['price'] for l in zone_levels]
-            avg_price = sum(prices) / len(prices)
-            sources = set(l['source'] for l in zone_levels)
-            
-            base_strength = sum(l['strength'] for l in zone_levels)
-            confluence_bonus = (len(zone_levels) - 1) * 15
-            source_bonus = (len(sources) - 1) * 20
-            
-            total_strength = min(100, (base_strength / len(zone_levels)) + confluence_bonus + source_bonus)
-            
-            types = [l['type'] for l in zone_levels]
-            if types.count('SUPPORT') > types.count('RESISTANCE'):
-                zone_type = 'SUPPORT'
-            elif types.count('RESISTANCE') > types.count('SUPPORT'):
-                zone_type = 'RESISTANCE'
-            else:
-                zone_type = 'PIVOT'
-            
-            distance_pct = ((avg_price - current_price) / current_price) * 100
-            
-            confluence_zones.append({
-                'price': round(float(avg_price), 2),
-                'price_low': round(float(min(prices)), 2),
-                'price_high': round(float(max(prices)), 2),
-                'type': zone_type,
-                'strength': round(float(total_strength), 1),
-                'num_confluences': int(len(zone_levels)),
-                'sources': list(sources),
-                'levels': [{'source': l['source'], 'name': l['name'], 'price': float(l['price'])} for l in zone_levels],
-                'distance_pct': round(float(distance_pct), 2),
-                'is_nearby': bool(abs(distance_pct) <= 3)
-            })
-    
-    confluence_zones.sort(key=lambda x: x['strength'], reverse=True)
-    
-    return confluence_zones
-
-
-def identify_key_zones(confluence_zones, current_price, direction, atr_value):
+def calculate_gann_eighths(high_52, low_52):
     """
-    Identify the most important zones for the expected move direction.
-    Always provides targets using ATR-based fallbacks when confluence zones are insufficient.
+    Calculate Gann Rule of Eighths - key support/resistance levels.
+    50% (4/8) is the most important - "center of gravity"
     """
-    current_price = float(current_price)
-    atr = float(atr_value)
-    
-    supports = [z for z in confluence_zones if z['price'] < current_price]
-    resistances = [z for z in confluence_zones if z['price'] > current_price]
-    
-    supports.sort(key=lambda x: x['price'], reverse=True)
-    resistances.sort(key=lambda x: x['price'])
-    
-    key_zones = {
-        'immediate_support': supports[0] if supports else None,
-        'major_support': max(supports, key=lambda x: x['strength']) if supports else None,
-        'immediate_resistance': resistances[0] if resistances else None,
-        'major_resistance': max(resistances, key=lambda x: x['strength']) if resistances else None
-    }
-    
-    def create_synthetic_target(base_price, multiplier, zone_type, label):
-        """Create a synthetic target based on ATR multiples (Gann volatility principle)."""
-        return {
-            'price': round(float(base_price), 2),
-            'type': zone_type,
-            'strength': max(50, 70 - (abs(multiplier) - 1) * 10),
-            'num_confluences': 1,
-            'sources': ['ATR_PROJECTION'],
-            'distance_pct': round(((base_price - current_price) / current_price) * 100, 2),
-            'is_nearby': abs(multiplier) <= 2,
-            'synthetic': True,
-            'label': label
-        }
-    
-    if direction == 'BULLISH':
-        target_zones = resistances.copy()
-        
-        if len(target_zones) < 1:
-            target_zones.append(create_synthetic_target(
-                current_price + atr * 1.5, 1.5, 'RESISTANCE', 'ATR 1.5x'
-            ))
-        if len(target_zones) < 2:
-            target_zones.append(create_synthetic_target(
-                current_price + atr * 3.0, 3.0, 'RESISTANCE', 'ATR 3x'
-            ))
-        if len(target_zones) < 3:
-            target_zones.append(create_synthetic_target(
-                current_price + atr * 4.5, 4.5, 'RESISTANCE', 'ATR 4.5x'
-            ))
-        
-        key_zones['target_1'] = target_zones[0]
-        key_zones['target_2'] = target_zones[1] if len(target_zones) > 1 else None
-        key_zones['target_3'] = target_zones[2] if len(target_zones) > 2 else None
-        
-        if supports:
-            key_zones['invalidation'] = supports[0]
-        else:
-            key_zones['invalidation'] = create_synthetic_target(
-                current_price - atr * 1.5, -1.5, 'SUPPORT', 'ATR Stop'
-            )
-    
-    else:  # BEARISH
-        target_zones = supports.copy()
-        
-        if len(target_zones) < 1:
-            target_zones.append(create_synthetic_target(
-                current_price - atr * 1.5, -1.5, 'SUPPORT', 'ATR 1.5x'
-            ))
-        if len(target_zones) < 2:
-            target_zones.append(create_synthetic_target(
-                current_price - atr * 3.0, -3.0, 'SUPPORT', 'ATR 3x'
-            ))
-        if len(target_zones) < 3:
-            target_zones.append(create_synthetic_target(
-                current_price - atr * 4.5, -4.5, 'SUPPORT', 'ATR 4.5x'
-            ))
-        
-        key_zones['target_1'] = target_zones[0]
-        key_zones['target_2'] = target_zones[1] if len(target_zones) > 1 else None
-        key_zones['target_3'] = target_zones[2] if len(target_zones) > 2 else None
-        
-        if resistances:
-            key_zones['invalidation'] = resistances[0]
-        else:
-            key_zones['invalidation'] = create_synthetic_target(
-                current_price + atr * 1.5, 1.5, 'RESISTANCE', 'ATR Stop'
-            )
-    
-    return key_zones
-
-
-# ============================================================================
-# ADX CALCULATION
-# ============================================================================
-
-def calculate_adx(df, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    try:
-        high = df['high'].values
-        low = df['low'].values
-        close = df['close'].values
-        
-        plus_dm = np.zeros(len(df))
-        minus_dm = np.zeros(len(df))
-        tr = np.zeros(len(df))
-        
-        for i in range(1, len(df)):
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            
-            plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
-            minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
-            
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-        
-        atr = pd.Series(tr).rolling(period).mean()
-        plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / (atr + 1e-10)
-        minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / (atr + 1e-10)
-        
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = dx.rolling(period).mean()
-        
-        return adx.fillna(20)
-    except Exception as e:
-        print(f"[WARNING] ADX calculation error: {e}")
-        return pd.Series([20.0] * len(df))
-
-
-# ============================================================================
-# ENNEAGRAM STATE IDENTIFICATION
-# ============================================================================
-
-def identify_enneagram_state(df, idx):
-    """Identify current Enneagram market state based on ADX, RSI, Volume, and price structure."""
-    try:
-        if idx < 50:
-            return 9, 50, {}
-        
-        row = df.iloc[idx]
-        rsi = float(row['rsi'])
-        volume_ratio = float(row['volume_ratio'])
-        adx = float(df['adx'].iloc[idx]) if 'adx' in df.columns else 20.0
-        
-        recent = df.iloc[max(0, idx-10):idx+1]
-        higher_highs = int((recent['high'].diff() > 0).sum()) > 5
-        higher_lows = int((recent['low'].diff() > 0).sum()) > 5
-        lower_highs = int((recent['high'].diff() < 0).sum()) > 5
-        lower_lows = int((recent['low'].diff() < 0).sum()) > 5
-        
-        scores = {}
-        
-        # State 1: Initiation
-        score_1 = 0
-        if 0 <= adx <= 25: score_1 += 25
-        if 35 <= rsi <= 65: score_1 += 25
-        if higher_lows and not higher_highs: score_1 += 30
-        if volume_ratio > 1.0: score_1 += 20
-        scores[1] = score_1
-        
-        # State 2: Early Distribution
-        score_2 = 0
-        if 20 <= adx <= 35: score_2 += 25
-        if 50 <= rsi <= 75: score_2 += 25
-        if lower_highs: score_2 += 30
-        if volume_ratio > 1.3: score_2 += 20
-        scores[2] = score_2
-        
-        # State 3: Completion
-        score_3 = 0
-        if adx > 35: score_3 += 25
-        if rsi > 70: score_3 += 30
-        if volume_ratio > 2.0: score_3 += 25
-        if higher_highs and rsi > 75: score_3 += 20
-        scores[3] = score_3
-        
-        # State 4: Retracement
-        score_4 = 0
-        if 15 <= adx <= 35: score_4 += 25
-        if 30 <= rsi <= 55: score_4 += 25
-        if lower_highs and higher_lows: score_4 += 30
-        if volume_ratio < 1.2: score_4 += 20
-        scores[4] = score_4
-        
-        # State 5: Deep Correction
-        score_5 = 0
-        if adx < 25: score_5 += 20
-        if rsi < 35: score_5 += 35
-        if lower_lows: score_5 += 25
-        if volume_ratio > 1.5: score_5 += 20
-        scores[5] = score_5
-        
-        # State 6: Decision
-        score_6 = 0
-        if 10 <= adx <= 25: score_6 += 30
-        if 35 <= rsi <= 55: score_6 += 25
-        if not higher_highs and not lower_lows: score_6 += 25
-        if volume_ratio < 0.9: score_6 += 20
-        scores[6] = score_6
-        
-        # State 7: Expansion
-        score_7 = 0
-        if 25 <= adx <= 45: score_7 += 25
-        if 50 <= rsi <= 70: score_7 += 30
-        if higher_highs and higher_lows: score_7 += 30
-        if volume_ratio > 1.1: score_7 += 15
-        scores[7] = score_7
-        
-        # State 8: Strong Markup
-        score_8 = 0
-        if adx > 35: score_8 += 25
-        if rsi > 60: score_8 += 25
-        if higher_highs: score_8 += 25
-        if volume_ratio > 1.5: score_8 += 25
-        scores[8] = score_8
-        
-        # State 9: Equilibrium
-        score_9 = 0
-        if adx < 20: score_9 += 35
-        if 40 <= rsi <= 60: score_9 += 25
-        if not higher_highs and not lower_lows: score_9 += 20
-        if volume_ratio < 0.8: score_9 += 20
-        scores[9] = score_9
-        
-        best_state = max(scores, key=scores.get)
-        confidence = min(95, scores[best_state])
-        
-        return int(best_state), int(confidence), {'adx': adx, 'rsi': rsi, 'scores': {k: int(v) for k, v in scores.items()}}
-        
-    except Exception as e:
-        print(f"[ERROR] identify_enneagram_state: {e}")
-        return 9, 50, {}
-
-
-# ============================================================================
-# ARROW DETERMINATION
-# ============================================================================
-
-def determine_active_arrow(state, df, idx, market_regime):
-    """Determine whether stress or growth arrow is active based on market conditions."""
-    stress_target, growth_target = TRANSITION_ARROWS[state]
-    
-    if idx < 20:
-        return 'growth', int(growth_target), True, 50.0
-    
-    recent_close = float(df['close'].iloc[idx])
-    sma_20 = float(df['close'].iloc[idx-20:idx].mean())
-    sma_50 = float(df['close'].iloc[max(0,idx-50):idx].mean()) if idx >= 50 else sma_20
-    
-    momentum_5 = float((df['close'].iloc[idx] - df['close'].iloc[idx-5]) / df['close'].iloc[idx-5] * 100)
-    momentum_20 = float((df['close'].iloc[idx] - df['close'].iloc[idx-20]) / df['close'].iloc[idx-20] * 100)
-    
-    bullish_conditions = 0
-    bearish_conditions = 0
-    
-    if market_regime == 'BULL': bullish_conditions += 2
-    elif market_regime == 'BEAR': bearish_conditions += 2
-    
-    if momentum_5 > 2: bullish_conditions += 1
-    elif momentum_5 < -2: bearish_conditions += 1
-    
-    if momentum_20 > 5: bullish_conditions += 1
-    elif momentum_20 < -5: bearish_conditions += 1
-    
-    if recent_close > sma_20: bullish_conditions += 1
-    else: bearish_conditions += 1
-    
-    if recent_close > sma_50: bullish_conditions += 1
-    else: bearish_conditions += 1
-    
-    if state == 5: bullish_conditions += 2
-    elif state == 8 and float(df['rsi'].iloc[idx]) > 70: bearish_conditions += 2
-    elif state == 3: bearish_conditions += 2
-    
-    if bullish_conditions > bearish_conditions:
-        arrow = 'growth'
-        target = growth_target
-    else:
-        arrow = 'stress'
-        target = stress_target
-    
-    is_bullish = TRANSITION_DIRECTION.get((state, target), True)
-    
-    total = bullish_conditions + bearish_conditions
-    if arrow == 'growth':
-        confidence = min(90.0, 50.0 + (bullish_conditions / max(1, total)) * 40)
-    else:
-        confidence = min(90.0, 50.0 + (bearish_conditions / max(1, total)) * 40)
-    
-    return arrow, int(target), bool(is_bullish), round(float(confidence), 1)
-
-
-# ============================================================================
-# GANN TIME WINDOWS
-# ============================================================================
-
-def calculate_gann_time_windows(current_state, target_state, pivot_date, cycles=None):
-    """
-    Calculate Gann time windows for state transition.
-    Always returns future dates, recalculating from today if pivot is too old.
-    """
-    if cycles is None:
-        cycles = [30, 90]
-    
-    current_angle = ENNEAGRAM_ANGLES[current_state]
-    target_angle = ENNEAGRAM_ANGLES[target_state]
-    
-    angular_distance = target_angle - current_angle
-    if angular_distance < 0:
-        angular_distance += 360
-    
-    now = datetime.now()
-    time_windows = []
-    
-    for cycle_length in cycles:
-        day_target = (angular_distance / 360) * cycle_length
-        tolerance = CYCLE_TOLERANCE.get(cycle_length, 3)
-        
-        target_date = pivot_date + timedelta(days=int(day_target))
-        
-        # If target date is in the past, recalculate from today
-        if target_date < now:
-            target_date = now + timedelta(days=int(day_target))
-        
-        window_start = target_date - timedelta(days=tolerance)
-        window_end = target_date + timedelta(days=tolerance)
-        days_from_now = (target_date - now).days
-        
-        time_windows.append({
-            'cycle_length': int(cycle_length),
-            'angular_distance': int(angular_distance),
-            'day_offset': round(float(day_target), 1),
-            'target_date': target_date.strftime('%Y-%m-%d'),
-            'target_date_display': target_date.strftime('%d/%m/%Y'),
-            'window_start': window_start.strftime('%Y-%m-%d'),
-            'window_end': window_end.strftime('%Y-%m-%d'),
-            'tolerance_days': int(tolerance),
-            'days_from_now': int(days_from_now)
-        })
-    
-    return time_windows
-
-
-# ============================================================================
-# ACTIVE PIVOT DETECTION
-# ============================================================================
-
-def calculate_active_pivot(df, current_price):
-    """Calculate the most significant recent pivot point."""
-    try:
-        current_price = float(current_price)
-        pivots = []
-        
-        for i in range(2, len(df) - 2):
-            # Swing High detection
-            if (df['high'].iloc[i] > df['high'].iloc[i-1] and 
-                df['high'].iloc[i] > df['high'].iloc[i-2] and
-                df['high'].iloc[i] > df['high'].iloc[i+1] and 
-                df['high'].iloc[i] > df['high'].iloc[i+2]):
-                
-                vol_avg = float(df['volume'].iloc[max(0,i-5):i].mean())
-                vol_ratio = float(df['volume'].iloc[i]) / vol_avg if vol_avg > 0 else 1.0
-                
-                pivots.append({
-                    'id': int(i),
-                    'price': float(df['high'].iloc[i]),
-                    'type': 'HIGH',
-                    'date': df['date'].iloc[i],
-                    'distance': float(abs(df['high'].iloc[i] - current_price)),
-                    'volume_ratio': float(vol_ratio)
-                })
-            
-            # Swing Low detection
-            if (df['low'].iloc[i] < df['low'].iloc[i-1] and 
-                df['low'].iloc[i] < df['low'].iloc[i-2] and
-                df['low'].iloc[i] < df['low'].iloc[i+1] and 
-                df['low'].iloc[i] < df['low'].iloc[i+2]):
-                
-                vol_avg = float(df['volume'].iloc[max(0,i-5):i].mean())
-                vol_ratio = float(df['volume'].iloc[i]) / vol_avg if vol_avg > 0 else 1.0
-                
-                pivots.append({
-                    'id': int(i),
-                    'price': float(df['low'].iloc[i]),
-                    'type': 'LOW',
-                    'date': df['date'].iloc[i],
-                    'distance': float(abs(df['low'].iloc[i] - current_price)),
-                    'volume_ratio': float(vol_ratio)
-                })
-        
-        if not pivots:
-            return None, []
-        
-        for p in pivots:
-            try:
-                if hasattr(p['date'], 'days'):
-                    days_ago = (df['date'].iloc[-1] - p['date']).days
-                else:
-                    days_ago = 30
-            except:
-                days_ago = 30
-            p['recency_score'] = float(max(0, 100 - days_ago))
-            p['combined_score'] = float(p['volume_ratio'] * 0.4 + p['recency_score'] * 0.6)
-        
-        best_pivot = max(pivots, key=lambda x: x['combined_score'])
-        recent_pivots = sorted(pivots, key=lambda x: x['date'], reverse=True)[:10]
-        
-        return best_pivot, recent_pivots
-        
-    except Exception as e:
-        print(f"[WARNING] Error calculating pivot: {e}")
-        return None, []
-
-
-# ============================================================================
-# CONFIRMATION SCORE
-# ============================================================================
-
-def generate_confirmation_score(state, arrow, is_bullish, df, idx, time_windows, confluence_zones, ichimoku):
-    """Generate confirmation score based on multiple system alignment."""
-    score = 0
-    breakdown = {}
-    
-    # 1. Enneagram Arrow alignment (max 25)
-    arrow_score = 20 if arrow else 10
-    if (is_bullish and float(df['close'].iloc[idx]) > float(df['close'].iloc[idx-5])):
-        arrow_score += 5
-    elif (not is_bullish and float(df['close'].iloc[idx]) < float(df['close'].iloc[idx-5])):
-        arrow_score += 5
-    breakdown['enneagram_arrow'] = min(25, arrow_score)
-    score += breakdown['enneagram_arrow']
-    
-    # 2. Price action structure (max 15)
-    recent = df.iloc[max(0, idx-10):idx+1]
-    higher_highs = int((recent['high'].diff() > 0).sum())
-    higher_lows = int((recent['low'].diff() > 0).sum())
-    
-    if is_bullish and higher_highs > 5 and higher_lows > 5:
-        breakdown['price_action'] = 15
-    elif not is_bullish and higher_highs < 5 and higher_lows < 5:
-        breakdown['price_action'] = 15
-    else:
-        breakdown['price_action'] = 8
-    score += breakdown['price_action']
-    
-    # 3. Volume confirmation (max 10)
-    vol_ratio = float(df['volume_ratio'].iloc[idx])
-    breakdown['volume'] = min(10, int(vol_ratio * 5))
-    score += breakdown['volume']
-    
-    # 4. ADX trend strength (max 10)
-    adx = float(df['adx'].iloc[idx]) if 'adx' in df.columns else 20.0
-    if 25 <= adx <= 45:
-        breakdown['adx'] = 10
-    elif 20 <= adx <= 50:
-        breakdown['adx'] = 7
-    else:
-        breakdown['adx'] = 4
-    score += breakdown['adx']
-    
-    # 5. RSI positioning (max 10)
-    rsi = float(df['rsi'].iloc[idx])
-    if is_bullish and 40 <= rsi <= 60:
-        breakdown['rsi'] = 10
-    elif not is_bullish and (rsi > 65 or rsi < 35):
-        breakdown['rsi'] = 10
-    else:
-        breakdown['rsi'] = 5
-    score += breakdown['rsi']
-    
-    # 6. Time window alignment (max 10)
-    today = datetime.now()
-    in_window = False
-    for tw in time_windows:
-        start = datetime.strptime(tw['window_start'], '%Y-%m-%d')
-        end = datetime.strptime(tw['window_end'], '%Y-%m-%d')
-        if start <= today <= end:
-            in_window = True
-            break
-    breakdown['time_window'] = 10 if in_window else 3
-    score += breakdown['time_window']
-    
-    # 7. Confluence zone strength (max 15)
-    nearby_zones = [z for z in confluence_zones if z['is_nearby']]
-    if nearby_zones:
-        best_zone = max(nearby_zones, key=lambda x: x['strength'])
-        breakdown['confluence'] = min(15, int(best_zone['strength'] * 0.15))
-    else:
-        breakdown['confluence'] = 5
-    score += breakdown['confluence']
-    
-    # 8. Ichimoku alignment (max 5)
-    ichi_score = 0
-    if is_bullish:
-        if ichimoku['cloud_signal'] == 'BULLISH': ichi_score += 2
-        if ichimoku['tk_cross'] == 'BULLISH': ichi_score += 2
-        if ichimoku['price_position'] == 'ABOVE_CLOUD': ichi_score += 1
-    else:
-        if ichimoku['cloud_signal'] == 'BEARISH': ichi_score += 2
-        if ichimoku['tk_cross'] == 'BEARISH': ichi_score += 2
-        if ichimoku['price_position'] == 'BELOW_CLOUD': ichi_score += 1
-    breakdown['ichimoku'] = min(5, ichi_score)
-    score += breakdown['ichimoku']
-    
-    return min(100, int(score)), {k: int(v) for k, v in breakdown.items()}
-
-
-def get_signal_recommendation(score):
-    """Signal strength based on confirmation score."""
-    if score >= 70:
-        return 'HIGH_CONFIDENCE', 'Full position size', '🟢'
-    elif score >= 50:
-        return 'MEDIUM_CONFIDENCE', 'Half position size', '🟡'
-    else:
-        return 'LOW_CONFIDENCE', 'No trade - wait', '🔴'
-
-
-# ============================================================================
-# PRICE DIRECTION CALCULATION
-# ============================================================================
-
-def calculate_price_direction(signals_list, signal_type, ichimoku_signal, rsi_val, is_bullish_arrow):
-    """Calculate price direction with probability based on multiple factors."""
-    bullish_signals = ['TREND_UP', 'RSI_OVERSOLD', 'RSI_WEAK', 'MACD_BULLISH', 
-                       'ICHIMOKU_BULL', 'ABOVE_PIVOT', 'RSI_MILD_UP']
-    bearish_signals = ['RSI_OVERBOUGHT', 'RSI_STRONG', 'MACD_BEARISH', 
-                       'ICHIMOKU_BEAR', 'BELOW_PIVOT', 'RSI_MILD_DOWN']
-    
-    bullish_count = sum(1 for s in signals_list if s in bullish_signals)
-    bearish_count = sum(1 for s in signals_list if s in bearish_signals)
-    
-    if ichimoku_signal == 'BULLISH':
-        bullish_count += 1
-    elif ichimoku_signal == 'BEARISH':
-        bearish_count += 1
-    
-    if is_bullish_arrow:
-        bullish_count += 1
-    else:
-        bearish_count += 1
-    
-    total = bullish_count + bearish_count
-    if total == 0:
-        total = 1
-    
-    bullish_ratio = bullish_count / total
-    
-    if bullish_ratio > 0.65:
-        direction = 'BULLISH'
-        emoji = '🟢 ↑'
-        base_prob = 60 + (bullish_ratio - 0.5) * 60
-    elif bullish_ratio < 0.35:
-        direction = 'BEARISH'
-        emoji = '🔴 ↓'
-        base_prob = 60 + (0.5 - bullish_ratio) * 60
-    elif bullish_ratio > 0.5:
-        direction = 'LEAN_BULLISH'
-        emoji = '🟡 ↗'
-        base_prob = 50 + (bullish_ratio - 0.5) * 40
-    elif bullish_ratio < 0.5:
-        direction = 'LEAN_BEARISH'
-        emoji = '🟡 ↘'
-        base_prob = 50 + (0.5 - bullish_ratio) * 40
-    else:
-        direction = 'NEUTRAL'
-        emoji = '⚪ →'
-        base_prob = 50
-    
-    probability = min(95, max(35, base_prob))
-    
-    reasoning_parts = []
-    if signal_type in ['BUY', 'SELL']:
-        reasoning_parts.append(f"{signal_type} signal active")
-    if ichimoku_signal != 'NEUTRAL':
-        reasoning_parts.append(f"Ichimoku {ichimoku_signal.lower()}")
-    if rsi_val < 35:
-        reasoning_parts.append("RSI oversold")
-    elif rsi_val > 65:
-        reasoning_parts.append("RSI overbought")
-    
-    reasoning = " | ".join(reasoning_parts) if reasoning_parts else "Mixed signals"
+    range_val = high_52 - low_52
     
     return {
-        'price_direction': direction,
-        'direction_emoji': emoji,
-        'direction_probability': round(probability, 1),
-        'direction_reasoning': reasoning,
-        'bullish_signals_count': bullish_count,
-        'bearish_signals_count': bearish_count
+        'major_low': round(low_52, 2),
+        'major_high': round(high_52, 2),
+        'range': round(range_val, 2),
+        '1_8': round(low_52 + range_val * 0.125, 2),
+        '2_8': round(low_52 + range_val * 0.250, 2),
+        '3_8': round(low_52 + range_val * 0.375, 2),
+        '4_8': round(low_52 + range_val * 0.500, 2),  # Most important
+        '5_8': round(low_52 + range_val * 0.625, 2),
+        '6_8': round(low_52 + range_val * 0.750, 2),
+        '7_8': round(low_52 + range_val * 0.875, 2)
+    }
+
+
+def calculate_square_of_9(anchor_price, angles=[45, 90, 135, 180, 225, 270, 315, 360]):
+    """
+    Calculate Gann Square of 9 levels from anchor price.
+    Returns both up and down projections for each angle.
+    """
+    if anchor_price <= 0:
+        return []
+    
+    sqrt_price = math.sqrt(anchor_price)
+    levels = []
+    
+    for angle in angles:
+        # Gann increment: angle/180 gives the number of "steps"
+        increment = angle / 180
+        
+        price_up = (sqrt_price + increment) ** 2
+        price_down = (sqrt_price - increment) ** 2
+        
+        levels.append({
+            'angle': angle,
+            'price_up': round(price_up, 2),
+            'price_down': round(max(0, price_down), 2),
+            'distance_up_pct': round((price_up - anchor_price) / anchor_price * 100, 2),
+            'distance_down_pct': round((price_down - anchor_price) / anchor_price * 100, 2) if price_down > 0 else -100
+        })
+    
+    return levels
+
+
+def calculate_multi_anchor_sq9(current_price, high_52, low_52):
+    """
+    Calculate Square of 9 from multiple anchor points as Gann recommended.
+    Confluence of levels from different anchors = high probability zones.
+    """
+    midpoint = (high_52 + low_52) / 2
+    
+    return {
+        'from_current': calculate_square_of_9(current_price),
+        'from_high': calculate_square_of_9(high_52),
+        'from_low': calculate_square_of_9(low_52),
+        'from_midpoint': calculate_square_of_9(midpoint),
+        'anchors': {
+            'current': round(current_price, 2),
+            'high_52': round(high_52, 2),
+            'low_52': round(low_52, 2),
+            'midpoint': round(midpoint, 2)
+        }
+    }
+
+
+def calculate_gann_time_cycles(last_pivot_date, pivot_type, current_date=None):
+    """
+    Calculate Gann time cycles from a pivot point.
+    Returns projected dates for each cycle.
+    """
+    if current_date is None:
+        current_date = datetime.now()
+    
+    if isinstance(last_pivot_date, str):
+        last_pivot_date = datetime.strptime(last_pivot_date, '%Y-%m-%d')
+    
+    days_since_pivot = (current_date - last_pivot_date).days
+    
+    cycles = []
+    
+    for cycle_days in GANN_DAY_CYCLES:
+        target_date = last_pivot_date + timedelta(days=cycle_days)
+        days_to_target = (target_date - current_date).days
+        
+        # Calculate cycle strength (strongest at exact cycle day)
+        distance_from_cycle = abs(days_since_pivot - cycle_days)
+        if distance_from_cycle == 0:
+            strength = 100
+        elif distance_from_cycle <= 2:
+            strength = 85
+        elif distance_from_cycle <= 5:
+            strength = 60
+        else:
+            strength = 30
+        
+        # Only include future windows or very recent ones
+        if days_to_target >= -3:
+            cycles.append({
+                'cycle_days': cycle_days,
+                'target_date': target_date.strftime('%Y-%m-%d'),
+                'target_display': target_date.strftime('%d/%m/%Y'),
+                'days_to_target': days_to_target,
+                'strength': strength,
+                'is_future': days_to_target > 0,
+                'from_pivot_type': pivot_type
+            })
+    
+    return sorted(cycles, key=lambda x: abs(x['days_to_target']))
+
+
+def find_anniversary_dates(pivot_date, pivot_type, current_date=None, lookback_years=3):
+    """
+    Find anniversary dates - Gann's principle of annual cycles.
+    """
+    if current_date is None:
+        current_date = datetime.now()
+    
+    if isinstance(pivot_date, str):
+        pivot_date = datetime.strptime(pivot_date, '%Y-%m-%d')
+    
+    anniversaries = []
+    
+    for years in range(1, lookback_years + 1):
+        # Add years
+        try:
+            anniversary = pivot_date.replace(year=pivot_date.year + years)
+        except ValueError:
+            # Handle Feb 29
+            anniversary = pivot_date.replace(year=pivot_date.year + years, day=28)
+        
+        days_away = (anniversary - current_date).days
+        
+        # Include if within 30 days (past or future)
+        if -30 <= days_away <= 30:
+            anniversaries.append({
+                'date': anniversary.strftime('%Y-%m-%d'),
+                'display': anniversary.strftime('%d/%m/%Y'),
+                'type': f'{years}Y_ANNIVERSARY',
+                'original_pivot_date': pivot_date.strftime('%Y-%m-%d'),
+                'original_pivot_type': pivot_type,
+                'days_away': days_away,
+                'importance': 'HIGH' if years == 1 else 'MEDIUM'
+            })
+    
+    return anniversaries
+
+
+def calculate_cycle_strength(days_since_pivot):
+    """
+    Calculate how close we are to a Gann cycle day.
+    Higher strength = more likely to see a turn.
+    """
+    closest_cycle = min(GANN_DAY_CYCLES, key=lambda x: abs(x - days_since_pivot))
+    distance = abs(closest_cycle - days_since_pivot)
+    
+    if distance == 0:
+        return {'strength': 100, 'nearest_cycle': closest_cycle, 'status': 'EXACT'}
+    elif distance <= 2:
+        return {'strength': 85, 'nearest_cycle': closest_cycle, 'status': 'VERY_CLOSE'}
+    elif distance <= 5:
+        return {'strength': 60, 'nearest_cycle': closest_cycle, 'status': 'APPROACHING'}
+    elif distance <= 10:
+        return {'strength': 40, 'nearest_cycle': closest_cycle, 'status': 'MODERATE'}
+    else:
+        return {'strength': 20, 'nearest_cycle': closest_cycle, 'status': 'DISTANT'}
+
+
+# ============================================================================
+# ENNEAGRAM STATE ANALYSIS
+# ============================================================================
+
+def identify_enneagram_state(df, timeframe='1D'):
+    """
+    Identify current Enneagram market state based on indicators.
+    Returns state number (1-9) and confidence.
+    """
+    if len(df) < 50:
+        return 9, 50, "Insufficient data"
+    
+    # Get indicators
+    rsi = calculate_rsi(df)
+    macd_data = calculate_macd(df)
+    macd_hist = macd_data['histogram']
+    adx_data = calculate_adx(df)
+    adx = adx_data['adx']
+    
+    # Price position
+    close = float(df['close'].iloc[-1])
+    sma_50 = float(df['close'].iloc[-50:].mean())
+    above_sma = close > sma_50
+    
+    # Volume trend (if available)
+    volume_increasing = True
+    if 'volume' in df.columns and len(df) >= 20:
+        recent_vol = df['volume'].iloc[-10:].mean()
+        prior_vol = df['volume'].iloc[-20:-10].mean()
+        volume_increasing = recent_vol > prior_vol * 1.1
+    
+    # State identification logic
+    if rsi < 30 and macd_hist < 0 and volume_increasing:
+        state = 5  # Capitulation
+        confidence = min(95, 70 + (30 - rsi))
+        reason = "Extreme oversold with high volume - capitulation"
+    elif rsi < 35 and macd_hist > 0 and not above_sma:
+        state = 6  # Accumulation
+        confidence = 75
+        reason = "Oversold but momentum turning - accumulation"
+    elif rsi > 70 and macd_hist > 0 and volume_increasing:
+        state = 3  # Peak Formation
+        confidence = min(90, 65 + (rsi - 70))
+        reason = "Extreme overbought with climactic volume - peak forming"
+    elif rsi > 65 and macd_hist < 0:
+        state = 8  # Distribution
+        confidence = 70
+        reason = "Overbought with declining momentum - distribution"
+    elif macd_hist > 0 and above_sma and rsi > 50 and rsi < 70:
+        if adx > 30:
+            state = 7  # Expansion
+            confidence = 80
+            reason = "Strong uptrend - expansion phase"
+        else:
+            state = 2  # Acceleration
+            confidence = 70
+            reason = "Building momentum - acceleration"
+    elif macd_hist < 0 and rsi > 40 and rsi < 60:
+        state = 4  # Retracement
+        confidence = 65
+        reason = "Pullback in neutral zone - retracement"
+    elif rsi > 45 and rsi < 55 and abs(macd_hist) < 50:
+        state = 9  # Equilibrium
+        confidence = 60
+        reason = "Neutral indicators - equilibrium"
+    elif macd_hist > 0 and rsi > 40 and rsi < 55:
+        state = 1  # Initiation
+        confidence = 65
+        reason = "Early momentum building - initiation"
+    else:
+        state = 9  # Default to Equilibrium
+        confidence = 50
+        reason = "Mixed signals - equilibrium"
+    
+    return state, confidence, reason
+
+
+def determine_active_arrow(state, df):
+    """
+    Determine if stress or growth arrow is active based on momentum.
+    """
+    state_info = ENNEAGRAM_STATES[state]
+    
+    # Get momentum indicators
+    macd_data = calculate_macd(df)
+    macd_hist = macd_data['histogram']
+    rsi = calculate_rsi(df)
+    
+    # Compare current vs recent momentum
+    stress_score = 0
+    growth_score = 0
+    
+    if macd_hist < 0:
+        stress_score += 2
+    else:
+        growth_score += 2
+    
+    if rsi < 45:
+        stress_score += 1
+    elif rsi > 55:
+        growth_score += 1
+    
+    # Check momentum direction
+    if len(df) >= 5:
+        recent_close = df['close'].iloc[-1]
+        prior_close = df['close'].iloc[-5]
+        if recent_close < prior_close:
+            stress_score += 1
+        else:
+            growth_score += 1
+    
+    if stress_score > growth_score:
+        arrow_type = "STRESS"
+        target_state = state_info["stress"]
+        confidence = min(85, 50 + stress_score * 10)
+    else:
+        arrow_type = "GROWTH"
+        target_state = state_info["growth"]
+        confidence = min(85, 50 + growth_score * 10)
+    
+    # Get meaning
+    meaning_key = (state, arrow_type, target_state)
+    meaning = ARROW_MEANINGS.get(meaning_key, "Market transitioning between phases")
+    
+    return {
+        'arrow_type': arrow_type,
+        'target_state': target_state,
+        'target_state_name': ENNEAGRAM_STATES[target_state]['name'],
+        'confidence': confidence,
+        'meaning': meaning
     }
 
 
 # ============================================================================
-# MAIN API ENDPOINT
+# MARKET REGIME DETECTION
+# ============================================================================
+
+def detect_market_regime(df):
+    """
+    Detect overall market regime - Gann's first step: identify the main trend.
+    """
+    if len(df) < 200:
+        return {
+            'regime': 'UNKNOWN',
+            'strength': 'WEAK',
+            'description': 'Insufficient data'
+        }
+    
+    close = float(df['close'].iloc[-1])
+    sma_200 = calculate_sma(df, 200)
+    adx_data = calculate_adx(df)
+    adx = adx_data['adx']
+    
+    # Determine regime
+    if close > sma_200:
+        if adx > 25:
+            regime = "TRENDING_BULL"
+            description = "Strong uptrend above 200 SMA"
+        else:
+            regime = "WEAK_BULL"
+            description = "Above 200 SMA but weak trend"
+    else:
+        if adx > 25:
+            regime = "TRENDING_BEAR"
+            description = "Strong downtrend below 200 SMA"
+        else:
+            regime = "WEAK_BEAR"
+            description = "Below 200 SMA but weak trend"
+    
+    # Check for ranging
+    if adx < 20:
+        regime = "RANGING"
+        description = "Low ADX indicates ranging/consolidation"
+    
+    return {
+        'regime': regime,
+        'strength': adx_data['trend_strength'],
+        'adx': adx,
+        'price_vs_sma200': 'ABOVE' if close > sma_200 else 'BELOW',
+        'sma_200': sma_200,
+        'description': description
+    }
+
+
+# ============================================================================
+# TIMEFRAME ANALYSIS
+# ============================================================================
+
+def analyze_single_timeframe(df, timeframe):
+    """
+    Complete analysis for a single timeframe.
+    Returns all indicators and signals.
+    """
+    if df is None or len(df) < 30:
+        return None
+    
+    current_price = float(df['close'].iloc[-1])
+    
+    # Get 52-period high/low for this timeframe
+    lookback = min(52, len(df))
+    high_52 = float(df['high'].iloc[-lookback:].max())
+    low_52 = float(df['low'].iloc[-lookback:].min())
+    
+    # Calculate all indicators
+    rsi = calculate_rsi(df)
+    macd_data = calculate_macd(df)
+    adx_data = calculate_adx(df)
+    atr = calculate_atr(df)
+    
+    # Ichimoku with timeframe-specific parameters
+    ichimoku_params = ICHIMOKU_PARAMS.get(timeframe, (9, 26, 52))
+    ichimoku = calculate_ichimoku(df, *ichimoku_params)
+    
+    # Gann levels
+    gann_eighths = calculate_gann_eighths(high_52, low_52)
+    
+    # Enneagram state
+    state, state_confidence, state_reason = identify_enneagram_state(df, timeframe)
+    state_info = ENNEAGRAM_STATES[state]
+    arrow = determine_active_arrow(state, df)
+    
+    # Determine direction for this timeframe
+    bullish_signals = 0
+    bearish_signals = 0
+    
+    # RSI
+    if rsi < 30:
+        bullish_signals += 2  # Oversold = bullish reversal potential
+    elif rsi > 70:
+        bearish_signals += 2  # Overbought = bearish reversal potential
+    elif rsi > 55:
+        bullish_signals += 1
+    elif rsi < 45:
+        bearish_signals += 1
+    
+    # MACD
+    if macd_data['histogram'] > 0:
+        bullish_signals += 1
+    else:
+        bearish_signals += 1
+    
+    # Ichimoku
+    if ichimoku['cloud_signal'] == 'BULLISH':
+        bullish_signals += 2
+    elif ichimoku['cloud_signal'] == 'BEARISH':
+        bearish_signals += 2
+    
+    if ichimoku['tk_cross'] == 'BULLISH':
+        bullish_signals += 1
+    elif ichimoku['tk_cross'] == 'BEARISH':
+        bearish_signals += 1
+    
+    # Enneagram bias
+    if state_info['bias'] == 'BULLISH':
+        bullish_signals += 1
+    elif state_info['bias'] == 'BEARISH':
+        bearish_signals += 1
+    
+    # Determine direction
+    if bullish_signals > bearish_signals + 1:
+        direction = "BULLISH"
+        signal_type = "BUY"
+    elif bearish_signals > bullish_signals + 1:
+        direction = "BEARISH"
+        signal_type = "SELL"
+    else:
+        direction = "NEUTRAL"
+        signal_type = "WAIT"
+    
+    # Get nearest SQ9 level
+    sq9_levels = calculate_square_of_9(current_price)
+    nearest_sq9 = None
+    min_distance = float('inf')
+    for level in sq9_levels:
+        for price_key in ['price_up', 'price_down']:
+            dist = abs(level[price_key] - current_price)
+            if dist < min_distance and level[price_key] > 0:
+                min_distance = dist
+                nearest_sq9 = {
+                    'angle': level['angle'],
+                    'price': level[price_key],
+                    'type': 'resistance' if level[price_key] > current_price else 'support'
+                }
+    
+    return {
+        'timeframe': timeframe,
+        'direction': direction,
+        'signal_type': signal_type,
+        'weight': TIMEFRAME_WEIGHTS[timeframe],
+        'weighted_contribution': TIMEFRAME_WEIGHTS[timeframe] if direction != 'NEUTRAL' else 0,
+        
+        # Price data
+        'current_price': current_price,
+        'high_52': high_52,
+        'low_52': low_52,
+        
+        # Enneagram
+        'enneagram_state': state,
+        'state_name': state_info['name'],
+        'state_phase': state_info['phase'],
+        'state_confidence': state_confidence,
+        'state_reason': state_reason,
+        'arrow_type': arrow['arrow_type'],
+        'target_state': arrow['target_state'],
+        'target_state_name': arrow['target_state_name'],
+        'arrow_meaning': arrow['meaning'],
+        
+        # Momentum
+        'rsi': rsi,
+        'macd': macd_data['macd'],
+        'macd_signal': macd_data['signal'],
+        'macd_histogram': macd_data['histogram'],
+        
+        # Trend
+        'adx': adx_data['adx'],
+        'trend_strength': adx_data['trend_strength'],
+        'plus_di': adx_data['plus_di'],
+        'minus_di': adx_data['minus_di'],
+        
+        # Volatility
+        'atr': atr,
+        
+        # Ichimoku
+        'tenkan': ichimoku['tenkan'],
+        'kijun': ichimoku['kijun'],
+        'cloud_top': ichimoku['cloud_top'],
+        'cloud_bottom': ichimoku['cloud_bottom'],
+        'cloud_signal': ichimoku['cloud_signal'],
+        'tk_cross': ichimoku['tk_cross'],
+        'price_vs_cloud': ichimoku['price_vs_cloud'],
+        'kijun_flat': ichimoku['kijun_flat'],
+        'chikou_signal': ichimoku['chikou_signal'],
+        
+        # Gann
+        'gann_50_pct': gann_eighths['4_8'],
+        'gann_levels': gann_eighths,
+        'sq9_nearest': nearest_sq9,
+        
+        # Signal counts
+        'bullish_signals': bullish_signals,
+        'bearish_signals': bearish_signals,
+        'net_signals': bullish_signals - bearish_signals
+    }
+
+
+def analyze_all_timeframes(df_daily):
+    """
+    Analyze all timeframes and return comprehensive results.
+    """
+    # Prepare data for each timeframe
+    tf_data = prepare_timeframe_data(df_daily)
+    
+    # Analyze each timeframe
+    analyses = {}
+    for tf in ['1D', '3D', '1W', '1M']:
+        if tf_data[tf] is not None and len(tf_data[tf]) >= 30:
+            analyses[tf] = analyze_single_timeframe(tf_data[tf], tf)
+        else:
+            analyses[tf] = None
+    
+    return analyses
+
+
+# ============================================================================
+# CONSENSUS CALCULATION
+# ============================================================================
+
+def calculate_consensus(timeframe_analyses):
+    """
+    Calculate weighted consensus across all timeframes.
+    Implements Gann's principle: higher timeframes dominate.
+    """
+    weighted_bullish = 0
+    weighted_bearish = 0
+    aligned_count = 0
+    aligned_direction = None
+    details = []
+    
+    monthly_direction = None
+    weekly_direction = None
+    
+    for tf in ['1M', '1W', '3D', '1D']:
+        analysis = timeframe_analyses.get(tf)
+        if analysis is None:
+            continue
+        
+        weight = TIMEFRAME_WEIGHTS[tf]
+        direction = analysis['direction']
+        
+        if direction == 'BULLISH':
+            weighted_bullish += weight
+        elif direction == 'BEARISH':
+            weighted_bearish += weight
+        
+        # Track alignment
+        if tf == '1M':
+            monthly_direction = direction
+            aligned_direction = direction
+        elif tf == '1W':
+            weekly_direction = direction
+        
+        if aligned_direction and direction == aligned_direction:
+            aligned_count += 1
+        
+        details.append(f"{tf}:{direction}")
+    
+    # Calculate percentages
+    total_weight = weighted_bullish + weighted_bearish
+    if total_weight > 0:
+        bullish_pct = int(weighted_bullish / total_weight * 100)
+        bearish_pct = int(weighted_bearish / total_weight * 100)
+    else:
+        bullish_pct = 50
+        bearish_pct = 50
+    
+    # Determine consensus direction
+    if bullish_pct >= 60:
+        consensus_direction = "BULLISH"
+        confidence_level = "HIGH" if bullish_pct >= 75 else "MEDIUM"
+    elif bearish_pct >= 60:
+        consensus_direction = "BEARISH"
+        confidence_level = "HIGH" if bearish_pct >= 75 else "MEDIUM"
+    else:
+        consensus_direction = "NEUTRAL"
+        confidence_level = "LOW"
+    
+    # Determine signal type
+    if confidence_level in ["HIGH", "MEDIUM"]:
+        if consensus_direction == "BULLISH":
+            signal_type = "BUY"
+        elif consensus_direction == "BEARISH":
+            signal_type = "SELL"
+        else:
+            signal_type = "WAIT"
+    else:
+        signal_type = "WAIT"
+    
+    # Check for divergences
+    daily_analysis = timeframe_analyses.get('1D')
+    daily_divergent = False
+    if daily_analysis and monthly_direction:
+        daily_divergent = daily_analysis['direction'] != monthly_direction and daily_analysis['direction'] != 'NEUTRAL'
+    
+    # Generate Gann interpretation
+    interpretation = generate_gann_interpretation(
+        consensus_direction,
+        monthly_direction,
+        weekly_direction,
+        daily_divergent,
+        timeframe_analyses
+    )
+    
+    return {
+        'direction': consensus_direction,
+        'signal_type': signal_type,
+        'weighted_bullish_pct': bullish_pct,
+        'weighted_bearish_pct': bearish_pct,
+        'weighted_score': max(bullish_pct, bearish_pct),
+        'confidence_level': confidence_level,
+        'alignment_count': f"{aligned_count}/4",
+        'alignment_detail': ', '.join(details),
+        'monthly_direction': monthly_direction,
+        'weekly_direction': weekly_direction,
+        'monthly_dominant': True,
+        'weekly_confirms': weekly_direction == monthly_direction if monthly_direction else False,
+        'daily_divergent': daily_divergent,
+        'interpretation': interpretation
+    }
+
+
+def generate_gann_interpretation(direction, monthly, weekly, daily_divergent, analyses):
+    """
+    Generate Gann-style interpretation of the multi-timeframe analysis.
+    """
+    interpretations = []
+    
+    if direction == "BEARISH":
+        if monthly == "BEARISH" and weekly == "BEARISH":
+            interpretations.append("Strong downtrend confirmed on Monthly and Weekly.")
+            if daily_divergent:
+                interpretations.append("Daily showing oversold bounce - this is a SELLING OPPORTUNITY, not a reversal.")
+                interpretations.append("Gann Rule: Never trade against the main trend.")
+            else:
+                interpretations.append("All timeframes aligned bearish - high probability sell setup.")
+        elif monthly == "BEARISH":
+            interpretations.append("Monthly trend is down. Weekly showing potential bounce.")
+            interpretations.append("Wait for weekly to realign bearish before adding shorts.")
+    
+    elif direction == "BULLISH":
+        if monthly == "BULLISH" and weekly == "BULLISH":
+            interpretations.append("Strong uptrend confirmed on Monthly and Weekly.")
+            if daily_divergent:
+                interpretations.append("Daily showing pullback - this is a BUYING OPPORTUNITY.")
+                interpretations.append("Gann: Buy the dips in an uptrend.")
+            else:
+                interpretations.append("All timeframes aligned bullish - high probability buy setup.")
+        elif monthly == "BULLISH":
+            interpretations.append("Monthly trend is up. Weekly showing correction.")
+            interpretations.append("Wait for weekly to realign bullish before buying.")
+    
+    else:  # NEUTRAL
+        interpretations.append("Timeframes conflicting - no clear trend.")
+        interpretations.append("Gann Rule #6: When in doubt, stay out.")
+        interpretations.append("Wait for alignment before committing capital.")
+    
+    return " ".join(interpretations)
+
+
+# ============================================================================
+# PRICE TARGET CALCULATION
+# ============================================================================
+
+def calculate_price_targets(timeframe_analyses, consensus, current_price):
+    """
+    Calculate price targets based on Gann confluence zones.
+    Uses weekly timeframe as primary source (per Gann).
+    """
+    weekly = timeframe_analyses.get('1W')
+    monthly = timeframe_analyses.get('1M')
+    daily = timeframe_analyses.get('1D')
+    
+    direction = consensus['direction']
+    targets = []
+    stop_sources = []
+    
+    if weekly is None:
+        # Fallback to daily
+        weekly = daily
+    
+    if weekly is None:
+        return {
+            'source_timeframe': 'N/A',
+            'tp1': current_price,
+            'tp2': current_price,
+            'tp3': current_price,
+            'stop_loss': current_price,
+            'calculation_method': 'No data available'
+        }
+    
+    gann_levels = weekly['gann_levels']
+    atr = weekly['atr']
+    
+    if direction == "BEARISH":
+        # Targets below current price
+        potential_targets = [
+            {'price': gann_levels['4_8'], 'source': 'GANN_50%_1W', 'priority': 1},
+            {'price': gann_levels['3_8'], 'source': 'GANN_3/8_1W', 'priority': 2},
+            {'price': weekly['cloud_bottom'], 'source': 'CLOUD_BOTTOM_1W', 'priority': 1},
+            {'price': weekly['kijun'], 'source': 'KIJUN_1W', 'priority': 2 if weekly['kijun_flat'] else 3},
+        ]
+        
+        # Add monthly levels for TP3
+        if monthly:
+            potential_targets.append({'price': monthly['gann_levels']['4_8'], 'source': 'GANN_50%_1M', 'priority': 3})
+        
+        # Filter targets below current price
+        valid_targets = [t for t in potential_targets if t['price'] < current_price * 0.995]
+        valid_targets.sort(key=lambda x: (x['priority'], -x['price']))  # Closest first within priority
+        
+        # Stop loss above current price
+        stop_price = max(
+            gann_levels['5_8'],
+            weekly['cloud_top'],
+            weekly['kijun'] if weekly['kijun'] > current_price else current_price + atr * 1.5
+        )
+        stop_sources = ['GANN_5/8_1W' if stop_price == gann_levels['5_8'] else 'CLOUD_TOP_1W']
+        
+    else:  # BULLISH or NEUTRAL
+        # Targets above current price
+        potential_targets = [
+            {'price': gann_levels['5_8'], 'source': 'GANN_5/8_1W', 'priority': 1},
+            {'price': gann_levels['6_8'], 'source': 'GANN_6/8_1W', 'priority': 2},
+            {'price': weekly['cloud_top'], 'source': 'CLOUD_TOP_1W', 'priority': 1},
+            {'price': weekly['kijun'], 'source': 'KIJUN_1W', 'priority': 2 if weekly['kijun_flat'] else 3},
+        ]
+        
+        if monthly:
+            potential_targets.append({'price': monthly['gann_levels']['5_8'], 'source': 'GANN_5/8_1M', 'priority': 3})
+        
+        # Filter targets above current price
+        valid_targets = [t for t in potential_targets if t['price'] > current_price * 1.005]
+        valid_targets.sort(key=lambda x: (x['priority'], x['price']))  # Closest first within priority
+        
+        # Stop loss below current price
+        stop_price = min(
+            gann_levels['3_8'],
+            weekly['cloud_bottom'],
+            weekly['kijun'] if weekly['kijun'] < current_price else current_price - atr * 1.5
+        )
+        stop_sources = ['GANN_3/8_1W' if stop_price == gann_levels['3_8'] else 'CLOUD_BOTTOM_1W']
+    
+    # Assign targets
+    tp1 = valid_targets[0]['price'] if len(valid_targets) > 0 else current_price + (atr * 2 if direction == "BULLISH" else -atr * 2)
+    tp2 = valid_targets[1]['price'] if len(valid_targets) > 1 else tp1 + (atr * 2 if direction == "BULLISH" else -atr * 2)
+    tp3 = valid_targets[2]['price'] if len(valid_targets) > 2 else tp2 + (atr * 2 if direction == "BULLISH" else -atr * 2)
+    
+    tp1_sources = [valid_targets[0]['source']] if len(valid_targets) > 0 else ['ATR_SYNTHETIC']
+    tp2_sources = [valid_targets[1]['source']] if len(valid_targets) > 1 else ['ATR_SYNTHETIC']
+    tp3_sources = [valid_targets[2]['source']] if len(valid_targets) > 2 else ['ATR_SYNTHETIC']
+    
+    return {
+        'source_timeframe': '1W',
+        'calculation_method': 'Gann Eighths + Ichimoku Confluence',
+        'tp1': round(tp1, 2),
+        'tp1_sources': tp1_sources,
+        'tp1_confluence_strength': len(tp1_sources),
+        'tp2': round(tp2, 2),
+        'tp2_sources': tp2_sources,
+        'tp2_confluence_strength': len(tp2_sources),
+        'tp3': round(tp3, 2),
+        'tp3_sources': tp3_sources,
+        'tp3_confluence_strength': len(tp3_sources),
+        'stop_loss': round(stop_price, 2),
+        'stop_sources': stop_sources,
+        'stop_reason': 'Weekly Kijun/Cloud resistance' if direction == "BEARISH" else 'Weekly Kijun/Cloud support'
+    }
+
+
+# ============================================================================
+# TIME FORECAST
+# ============================================================================
+
+def calculate_time_forecast(timeframe_analyses, consensus, current_price):
+    """
+    Calculate time-based forecasts using Gann cycles.
+    """
+    today = datetime.now()
+    
+    # Get daily ATR for price projection
+    daily = timeframe_analyses.get('1D')
+    atr_daily = daily['atr'] if daily else current_price * 0.025
+    
+    # Find last significant pivot (simplified - use recent swing)
+    # In production, this would come from actual pivot detection
+    last_high_date = today - timedelta(days=30)  # Placeholder
+    last_low_date = today - timedelta(days=45)   # Placeholder
+    
+    # Calculate cycles from both pivots
+    cycles_from_high = calculate_gann_time_cycles(last_high_date, 'HIGH', today)
+    cycles_from_low = calculate_gann_time_cycles(last_low_date, 'LOW', today)
+    
+    # Find the nearest future cycle
+    all_future_cycles = [c for c in cycles_from_high + cycles_from_low if c['is_future']]
+    all_future_cycles.sort(key=lambda x: x['days_to_target'])
+    
+    if all_future_cycles:
+        nearest = all_future_cycles[0]
+        days_to_pivot = nearest['days_to_target']
+        pivot_date = nearest['target_date']
+        pivot_display = nearest['target_display']
+        pivot_confidence = nearest['strength']
+        cycle_sources = [f"{nearest['cycle_days']}D_CYCLE from {nearest['from_pivot_type']}"]
+    else:
+        days_to_pivot = 7
+        pivot_date = (today + timedelta(days=7)).strftime('%Y-%m-%d')
+        pivot_display = (today + timedelta(days=7)).strftime('%d/%m/%Y')
+        pivot_confidence = 50
+        cycle_sources = ['DEFAULT_7D_PROJECTION']
+    
+    # Determine expected pivot type based on consensus
+    if consensus['direction'] == 'BEARISH':
+        expected_pivot = 'LOW'
+    elif consensus['direction'] == 'BULLISH':
+        expected_pivot = 'HIGH'
+    else:
+        expected_pivot = 'UNKNOWN'
+    
+    # Calculate probable price range at pivot
+    efficiency_factor = 0.7
+    max_expected_move = atr_daily * days_to_pivot * efficiency_factor
+    
+    if consensus['direction'] == 'BEARISH':
+        probable_low = current_price - max_expected_move
+        probable_high = current_price + (atr_daily * days_to_pivot * 0.3)
+    else:
+        probable_high = current_price + max_expected_move
+        probable_low = current_price - (atr_daily * days_to_pivot * 0.3)
+    
+    # Check anniversary dates
+    anniversaries = find_anniversary_dates(last_high_date, 'HIGH', today)
+    anniversaries.extend(find_anniversary_dates(last_low_date, 'LOW', today))
+    
+    return {
+        'next_pivot_date': pivot_date,
+        'next_pivot_display': pivot_display,
+        'days_to_pivot': days_to_pivot,
+        'pivot_type': expected_pivot,
+        'pivot_confidence': pivot_confidence,
+        'cycle_sources': cycle_sources,
+        'probable_price_low': round(probable_low, 2),
+        'probable_price_high': round(probable_high, 2),
+        'probable_range_text': f"${round(probable_low):,} - ${round(probable_high):,}",
+        'atr_daily': round(atr_daily, 2),
+        'max_expected_move': round(max_expected_move, 2),
+        'efficiency_factor': efficiency_factor,
+        'anniversary_dates': anniversaries[:3]  # Top 3 nearest
+    }
+
+
+# ============================================================================
+# INVALIDATION RULES
+# ============================================================================
+
+def calculate_invalidation_rules(timeframe_analyses, consensus, current_price):
+    """
+    Define what would invalidate the current analysis.
+    """
+    weekly = timeframe_analyses.get('1W')
+    
+    if weekly is None:
+        return {
+            'invalidation_price': current_price,
+            'rules': []
+        }
+    
+    rules = []
+    invalidation_price = current_price
+    
+    if consensus['direction'] == 'BEARISH':
+        # What would invalidate bearish case
+        invalidation_price = weekly['kijun'] if weekly['kijun'] > current_price else weekly['cloud_top']
+        
+        rules = [
+            {'condition': 'Daily close above Weekly Kijun', 'price': round(weekly['kijun'], 2)},
+            {'condition': 'Weekly RSI breaks above 65', 'current': weekly['rsi']},
+            {'condition': 'Weekly close above cloud top', 'price': round(weekly['cloud_top'], 2)}
+        ]
+    
+    elif consensus['direction'] == 'BULLISH':
+        invalidation_price = weekly['kijun'] if weekly['kijun'] < current_price else weekly['cloud_bottom']
+        
+        rules = [
+            {'condition': 'Daily close below Weekly Kijun', 'price': round(weekly['kijun'], 2)},
+            {'condition': 'Weekly RSI breaks below 35', 'current': weekly['rsi']},
+            {'condition': 'Weekly close below cloud bottom', 'price': round(weekly['cloud_bottom'], 2)}
+        ]
+    
+    return {
+        'invalidation_price': round(invalidation_price, 2),
+        'invalidation_reason': 'Weekly Kijun breach' if weekly['kijun_flat'] else 'Cloud breach',
+        'rules': rules
+    }
+
+
+# ============================================================================
+# STRATEGY GENERATION
+# ============================================================================
+
+def generate_strategy(consensus, timeframe_analyses, targets, time_forecast, invalidation):
+    """
+    Generate complete trading strategy based on analysis.
+    """
+    direction = consensus['direction']
+    confidence = consensus['confidence_level']
+    daily_divergent = consensus['daily_divergent']
+    
+    # Primary bias
+    primary_bias = direction if direction != 'NEUTRAL' else 'NO_TRADE'
+    
+    # Action
+    if direction == 'BEARISH':
+        if daily_divergent:
+            action = "Sell rallies toward Weekly Kijun"
+            entry_method = "Wait for daily RSI > 50 then bearish TK cross, or test of weekly resistance"
+        else:
+            action = "Sell at market or on minor bounces"
+            entry_method = "Enter short on any rally with stop above weekly Kijun"
+    elif direction == 'BULLISH':
+        if daily_divergent:
+            action = "Buy dips toward Weekly Kijun"
+            entry_method = "Wait for daily RSI < 50 then bullish TK cross, or test of weekly support"
+        else:
+            action = "Buy at market or on minor dips"
+            entry_method = "Enter long on any pullback with stop below weekly Kijun"
+    else:
+        action = "No trade - wait for clarity"
+        entry_method = "Monitor for timeframe alignment"
+    
+    # Position size recommendation
+    if confidence == 'HIGH':
+        position_size = "Full size (high confidence)"
+    elif confidence == 'MEDIUM':
+        position_size = "Half size (medium confidence)"
+    else:
+        position_size = "No position (low confidence)"
+    
+    # Time in trade
+    time_in_trade = f"Hold until TP1 or pivot date ({time_forecast['next_pivot_display']})"
+    
+    # Invalidation action
+    invalidation_action = f"Close position if price closes {'above' if direction == 'BEARISH' else 'below'} ${invalidation['invalidation_price']:,.0f}"
+    
+    return {
+        'primary_bias': primary_bias,
+        'action': action,
+        'entry_method': entry_method,
+        'position_size_recommendation': position_size,
+        'time_in_trade': time_in_trade,
+        'interpretation': consensus['interpretation'],
+        'invalidation_action': invalidation_action
+    }
+
+
+# ============================================================================
+# MAIN ENDPOINT
 # ============================================================================
 
 @app.get("/signal/daily")
 async def get_daily_signal():
-    """Generate daily LUXOR V7 signal - INVINCIBLE Edition v4.0.6 with Price-Time Forecast"""
+    """Generate comprehensive multi-timeframe daily trading signal"""
     try:
-        print("\n" + "="*80)
-        print("[API] GET /signal/daily - INVINCIBLE Edition v4.0.6")
-        print("="*80)
-        sys.stdout.flush()
+        print("\n" + "="*70)
+        print("  LUXOR V7 PRANA - MULTI-TIMEFRAME EDITION v5.0.0")
+        print("="*70)
         
-        # 1. Fetch data
-        print("[1/11] Fetching data...")
-        df = luxor.fetch_real_binance_data(use_cache=True)
+        # [1/10] Fetch data
+        print("\n[1/10] Fetching BTCUSDT daily data...")
+        df_daily = luxor.fetch_real_binance_data(use_cache=True)
         
-        if df is None or len(df) < 100:
-            raise Exception(f"Insufficient data: {len(df) if df is not None else 0}")
+        if df_daily is None or len(df_daily) < 100:
+            raise HTTPException(status_code=500, detail="Insufficient data")
         
-        print(f"[1/11] ✓ Data: {len(df)} candles")
-        sys.stdout.flush()
+        print(f"       Loaded {len(df_daily)} daily candles")
         
-        # 2. Calculate base indicators
-        print("[2/11] Calculating base indicators...")
-        output = luxor.get_daily_signal(df)
-        
-        if output.get('status') == 'error':
-            raise Exception(output.get('detail'))
-        
-        df['adx'] = calculate_adx(df)
-        idx = len(df) - 1
-        current_price = float(df['close'].iloc[idx])
-        atr_value = float(df['atr'].iloc[idx]) if 'atr' in df.columns else float(output.get('atr', current_price * 0.02))
-        
-        print(f"[2/11] ✓ Price: ${current_price:.2f}, RSI: {output['rsi']:.1f}, ATR: ${atr_value:.2f}")
-        sys.stdout.flush()
-        
-        # 3. Find major pivots for Gann Eighths
-        print("[3/11] Calculating Gann Rule of Eighths...")
-        major_pivots = find_major_pivots(df, lookback=252)
-        gann_eighths = calculate_gann_eighths(major_pivots['major_high'], major_pivots['major_low'])
-        
-        print(f"[3/11] ✓ Range: ${major_pivots['major_low']:.2f} - ${major_pivots['major_high']:.2f}")
-        print(f"       50% Level (4/8): ${gann_eighths['4/8']['price']:.2f}")
-        sys.stdout.flush()
-        
-        # 4. Calculate Ichimoku levels
-        print("[4/11] Calculating Ichimoku Cloud levels...")
-        ichimoku = get_ichimoku_levels(df, idx)
-        
-        print(f"[4/11] ✓ Cloud: {ichimoku['cloud_signal']}, TK Cross: {ichimoku['tk_cross']}")
-        print(f"       Tenkan: ${ichimoku['tenkan']:.2f}, Kijun: ${ichimoku['kijun']:.2f}")
-        sys.stdout.flush()
-        
-        # 5. Calculate Square of 9 levels
-        print("[5/11] Calculating Square of 9 levels...")
-        sq9_levels = calculate_square_of_9_levels(current_price, direction='both')
-        
-        print(f"[5/11] ✓ Generated {len(sq9_levels)} Sq9 levels")
-        sys.stdout.flush()
-        
-        # 6. Find confluence zones
-        print("[6/11] Finding confluence zones...")
-        confluence_zones = find_confluence_zones(current_price, gann_eighths, ichimoku, sq9_levels)
-        
-        strong_zones = [z for z in confluence_zones if z['strength'] >= 70]
-        print(f"[6/11] ✓ Found {len(confluence_zones)} zones, {len(strong_zones)} strong (≥70%)")
-        for z in strong_zones[:3]:
-            print(f"       ${z['price']:.2f} ({z['type']}) - {z['strength']}% - {z['num_confluences']} confluences")
-        sys.stdout.flush()
-        
-        # 7. Identify Enneagram state
-        print("[7/11] Identifying Enneagram state...")
-        enneagram_state, state_confidence, state_details = identify_enneagram_state(df, idx)
-        state_info = MARKET_STATES[enneagram_state]
-        
-        print(f"[7/11] ✓ State {enneagram_state}: {state_info['name']} ({state_confidence}%)")
-        sys.stdout.flush()
-        
-        # 8. Determine market regime and arrow
-        print("[8/11] Determining direction...")
-        sma_200 = float(df['close'].rolling(200).mean().iloc[-1])
-        
-        if current_price > sma_200 * 1.02:
-            market_regime = 'BULL'
-        elif current_price < sma_200 * 0.98:
-            market_regime = 'BEAR'
+        # Current price
+        current_price = float(df_daily['close'].iloc[-1])
+        signal_date = df_daily.iloc[-1]['date']
+        if hasattr(signal_date, 'strftime'):
+            signal_date_str = signal_date.strftime('%Y-%m-%d %H:%M:%S')
         else:
-            market_regime = 'RANGE'
+            signal_date_str = str(signal_date)
         
-        arrow_type, target_state, is_bullish, arrow_confidence = determine_active_arrow(
-            enneagram_state, df, idx, market_regime
-        )
+        # [2/10] Analyze all timeframes
+        print("[2/10] Analyzing all timeframes...")
+        tf_analyses = analyze_all_timeframes(df_daily)
         
-        target_info = MARKET_STATES[target_state]
-        direction = 'BULLISH' if is_bullish else 'BEARISH'
-        direction_emoji = '🟢 ↑' if is_bullish else '🔴 ↓'
+        for tf in ['1D', '3D', '1W', '1M']:
+            if tf_analyses[tf]:
+                print(f"       {tf}: {tf_analyses[tf]['direction']} (State {tf_analyses[tf]['enneagram_state']})")
         
-        print(f"[8/11] ✓ {direction} ({arrow_confidence}%)")
-        print(f"       Arrow: {arrow_type.upper()} → State {target_state} ({target_info['name']})")
-        sys.stdout.flush()
+        # [3/10] Calculate consensus
+        print("[3/10] Calculating weighted consensus...")
+        consensus = calculate_consensus(tf_analyses)
+        print(f"       Direction: {consensus['direction']} ({consensus['weighted_score']}% confidence)")
         
-        # 9. Calculate time windows and key zones
-        print("[9/11] Calculating time windows and key zones...")
-        active_pivot, recent_pivots = calculate_active_pivot(df, current_price)
+        # [4/10] Market regime
+        print("[4/10] Detecting market regime...")
+        regime = detect_market_regime(df_daily)
+        print(f"       Regime: {regime['regime']}")
         
-        if active_pivot:
-            pivot_date = active_pivot['date']
-            if hasattr(pivot_date, 'to_pydatetime'):
-                pivot_date = pivot_date.to_pydatetime()
-            elif isinstance(pivot_date, str):
-                pivot_date = datetime.strptime(pivot_date, '%Y-%m-%d')
-        else:
-            pivot_date = datetime.now() - timedelta(days=7)
+        # [5/10] Price targets
+        print("[5/10] Calculating price targets...")
+        targets = calculate_price_targets(tf_analyses, consensus, current_price)
+        print(f"       TP1: ${targets['tp1']:,.0f} | TP2: ${targets['tp2']:,.0f} | SL: ${targets['stop_loss']:,.0f}")
         
-        time_windows = calculate_gann_time_windows(enneagram_state, target_state, pivot_date, cycles=[30, 90])
-        key_zones = identify_key_zones(confluence_zones, current_price, direction, atr_value)
+        # [6/10] Time forecast
+        print("[6/10] Calculating time forecast...")
+        time_forecast = calculate_time_forecast(tf_analyses, consensus, current_price)
+        print(f"       Next pivot: {time_forecast['next_pivot_display']} ({time_forecast['pivot_type']})")
         
-        print(f"[9/11] ✓ Time windows calculated, key zones identified")
-        if key_zones.get('target_1'):
-            print(f"       Target 1: ${key_zones['target_1']['price']:.2f}")
-        if key_zones.get('target_2'):
-            print(f"       Target 2: ${key_zones['target_2']['price']:.2f}")
-        sys.stdout.flush()
+        # [7/10] Invalidation rules
+        print("[7/10] Setting invalidation rules...")
+        invalidation = calculate_invalidation_rules(tf_analyses, consensus, current_price)
         
-        # 10. Generate confirmation score and final signal
-        print("[10/11] Generating confirmation score...")
-        confirmation_score, score_breakdown = generate_confirmation_score(
-            enneagram_state, arrow_type, is_bullish, df, idx,
-            time_windows, confluence_zones, ichimoku
-        )
-        signal_strength, position_advice, strength_emoji = get_signal_recommendation(confirmation_score)
+        # [8/10] Strategy generation
+        print("[8/10] Generating trading strategy...")
+        strategy = generate_strategy(consensus, tf_analyses, targets, time_forecast, invalidation)
         
-        # Calculate price direction
-        price_direction_data = calculate_price_direction(
-            output.get('signals', []),
-            output.get('signal_type', 'WAIT'),
-            ichimoku['cloud_signal'],
-            output.get('rsi', 50),
-            is_bullish
-        )
+        # [9/10] Square of 9 analysis
+        print("[9/10] Calculating Square of 9 levels...")
+        daily = tf_analyses.get('1D')
+        high_52 = daily['high_52'] if daily else current_price * 1.5
+        low_52 = daily['low_52'] if daily else current_price * 0.5
+        sq9_analysis = calculate_multi_anchor_sq9(current_price, high_52, low_52)
         
-        print(f"[10/11] ✓ Confirmation: {confirmation_score}% ({signal_strength})")
-        print(f"        Direction: {price_direction_data['price_direction']} ({price_direction_data['direction_probability']}%)")
-        sys.stdout.flush()
+        # [10/10] Build response
+        print("[10/10] Building response...")
         
-        # 11. Calculate Price-Time Forecast
-        print("[11/11] Calculating price-time forecast...")
+        # Get primary timeframe data for legacy fields
+        weekly = tf_analyses.get('1W') or tf_analyses.get('1D')
+        monthly = tf_analyses.get('1M') or weekly
+        daily_tf = tf_analyses.get('1D')
         
-        # Select primary pivot forecast - always provide a future pivot
-        future_windows = [tw for tw in time_windows if tw['days_from_now'] > 0]
-        if future_windows:
-            nearest_window = min(future_windows, key=lambda x: x['days_from_now'])
-            days_to_pivot = nearest_window['days_from_now']
-            primary_pivot = {
-                'date': nearest_window['target_date'],
-                'date_display': nearest_window['target_date_display'],
-                'days_from_now': days_to_pivot,
-                'expected_pivot': 'HIGH' if is_bullish else 'LOW',
-                'confidence': min(85, arrow_confidence),
-                'cycle_type': f"{nearest_window['cycle_length']}-day cycle"
-            }
-        else:
-            fallback_date = datetime.now() + timedelta(days=7)
-            days_to_pivot = 7
-            primary_pivot = {
-                'date': fallback_date.strftime('%Y-%m-%d'),
-                'date_display': fallback_date.strftime('%d/%m/%Y'),
-                'days_from_now': days_to_pivot,
-                'expected_pivot': 'HIGH' if is_bullish else 'LOW',
-                'confidence': 55,
-                'cycle_type': 'Short-term projection'
-            }
+        # Legacy Gann levels
+        gann_levels = weekly['gann_levels'] if weekly else calculate_gann_eighths(high_52, low_52)
         
-        # Calculate maximum expected move based on ATR and days to pivot
-        efficiency_factor = 0.7
-        max_expected_move = atr_value * days_to_pivot * efficiency_factor
+        # Prepare timeframes for JSON (ensure serializable)
+        timeframes_clean = {}
+        for tf, analysis in tf_analyses.items():
+            if analysis:
+                timeframes_clean[tf] = {
+                    'direction': analysis['direction'],
+                    'signal_type': analysis['signal_type'],
+                    'weight': analysis['weight'],
+                    'weighted_contribution': analysis['weighted_contribution'],
+                    'enneagram_state': analysis['enneagram_state'],
+                    'state_name': analysis['state_name'],
+                    'rsi': analysis['rsi'],
+                    'macd_histogram': analysis['macd_histogram'],
+                    'adx': analysis['adx'],
+                    'trend_strength': analysis['trend_strength'],
+                    'cloud_signal': analysis['cloud_signal'],
+                    'tk_cross': analysis['tk_cross'],
+                    'kijun_flat': analysis['kijun_flat'],
+                    'gann_50_pct': analysis['gann_50_pct'],
+                    'bullish_signals': analysis['bullish_signals'],
+                    'bearish_signals': analysis['bearish_signals']
+                }
         
-        # Calculate probable price range at pivot
-        if direction == 'BEARISH':
-            probable_price_low = current_price - max_expected_move
-            probable_price_high = current_price + (atr_value * days_to_pivot * 0.3)
-        else:  # BULLISH
-            probable_price_high = current_price + max_expected_move
-            probable_price_low = current_price - (atr_value * days_to_pivot * 0.3)
-        
-        # Extract target prices
-        target_1 = key_zones.get('target_1')
-        target_2 = key_zones.get('target_2')
-        target_3 = key_zones.get('target_3')
-        invalidation = key_zones.get('invalidation')
-        
-        target_1_price = float(target_1['price']) if target_1 else 0
-        target_2_price = float(target_2['price']) if target_2 else 0
-        target_3_price = float(target_3['price']) if target_3 else 0
-        
-        # Check which targets are reachable (inside probable range)
-        def is_target_reachable(target_price, dir, prob_low, prob_high, curr_price):
-            if not target_price:
-                return False
-            if dir == 'BEARISH':
-                return prob_low <= target_price <= curr_price
-            else:
-                return curr_price <= target_price <= prob_high
-        
-        target_1_reachable = is_target_reachable(target_1_price, direction, probable_price_low, probable_price_high, current_price) if target_1 else False
-        target_2_reachable = is_target_reachable(target_2_price, direction, probable_price_low, probable_price_high, current_price) if target_2 else False
-        target_3_reachable = is_target_reachable(target_3_price, direction, probable_price_low, probable_price_high, current_price) if target_3 else False
-        
-        # Calculate distances
-        target_1_distance = abs(target_1_price - current_price) if target_1 else 0
-        target_2_distance = abs(target_2_price - current_price) if target_2 else 0
-        target_3_distance = abs(target_3_price - current_price) if target_3 else 0
-        
-        # Determine status text
-        def get_target_status(reachable, target_price, dir, prob_low, prob_high):
-            if not target_price:
-                return "N/A"
-            if reachable:
-                return "INSIDE range - likely hit"
-            else:
-                if dir == 'BEARISH' and target_price < prob_low:
-                    return "BELOW range - needs more time"
-                elif dir == 'BULLISH' and target_price > prob_high:
-                    return "ABOVE range - needs more time"
-                else:
-                    return "OUTSIDE range - needs more time"
-        
-        target_1_status = get_target_status(target_1_reachable, target_1_price, direction, probable_price_low, probable_price_high)
-        target_2_status = get_target_status(target_2_reachable, target_2_price, direction, probable_price_low, probable_price_high)
-        target_3_status = get_target_status(target_3_reachable, target_3_price, direction, probable_price_low, probable_price_high)
-        
-        # Build price-time forecast object
-        price_time_forecast = {
-            'days_to_pivot': int(days_to_pivot),
-            'atr_daily': round(float(atr_value), 2),
-            'max_expected_move': round(float(max_expected_move), 2),
-            'efficiency_factor': efficiency_factor,
-            'probable_price_low': round(float(probable_price_low), 2),
-            'probable_price_high': round(float(probable_price_high), 2),
-            'probable_range_text': f"${round(probable_price_low):,} - ${round(probable_price_high):,}",
-            'target_1_price': round(float(target_1_price), 2) if target_1 else None,
-            'target_1_reachable': bool(target_1_reachable),
-            'target_1_distance': round(float(target_1_distance), 2),
-            'target_1_status': target_1_status,
-            'target_2_price': round(float(target_2_price), 2) if target_2 else None,
-            'target_2_reachable': bool(target_2_reachable),
-            'target_2_distance': round(float(target_2_distance), 2),
-            'target_2_status': target_2_status,
-            'target_3_price': round(float(target_3_price), 2) if target_3 else None,
-            'target_3_reachable': bool(target_3_reachable),
-            'target_3_distance': round(float(target_3_distance), 2),
-            'target_3_status': target_3_status,
-            'direction': direction
-        }
-        
-        print(f"[11/11] ✓ Price-Time Forecast calculated")
-        print(f"        Days to pivot: {days_to_pivot}")
-        print(f"        ATR: ${atr_value:.0f}/day, Max move: ${max_expected_move:.0f}")
-        print(f"        Probable range: ${probable_price_low:.0f} - ${probable_price_high:.0f}")
-        print(f"        TP1 ${target_1_price:.0f}: {target_1_status}")
-        print(f"        TP2 ${target_2_price:.0f}: {target_2_status}")
-        print(f"        TP3 ${target_3_price:.0f}: {target_3_status}")
-        sys.stdout.flush()
-        
-        # Extract numeric values for DB
-        take_profit_price = round(float(target_1['price']), 2) if target_1 else round(current_price + atr_value * 3, 2)
-        stop_loss_price = round(float(invalidation['price']), 2) if invalidation else round(current_price - atr_value * 1.5, 2)
-        
-        # Prepare Sq9 levels for DB (key levels only) - as JSON string
-        gann_sq9_levels_db = [
-            {'angle': lvl['angle'], 'price': lvl['price'], 'direction': lvl['direction'], 'type': lvl['type']}
-            for lvl in sq9_levels if lvl['angle'] in [90, 180, 270, 360]
-        ]
-        
-        # Prepare active Gann angles - as JSON string
-        gann_angles_active_db = [lvl['angle'] for lvl in sq9_levels if lvl.get('active', False)]
-        
-        # Prepare confluence details for DB - as JSON string
-        confluence_details_db = {
-            'score': confirmation_score,
-            'breakdown': score_breakdown,
-            'zones_count': len(confluence_zones),
-            'strong_zones_count': len(strong_zones),
-            'sources': list(set(s for z in strong_zones for s in z.get('sources', [])))
-        }
-        
-        # Build response with ALL fields matching exact DB schema types
+        # Build complete response
         response_data = {
-            # ==================== CORE FIELDS ====================
-            'status': 'success',
-            'version': '4.0.6',
-            'timestamp': datetime.now().isoformat(),
-            'signal_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'symbol': 'BTCUSDT',
-            'entry_price': round(current_price, 2),
+            # System info
+            "status": "success",
+            "version": "5.0.0",
+            "timestamp": datetime.now().isoformat(),
             
-            # ==================== DB FIELDS (EXACT TYPES) ====================
-            'signal_type': str(output.get('signal_type', 'WAIT')),
-            'enneagram_arrow': str(arrow_type),
-            'macd_signal': str(round(output.get('macd', 0), 4)),
-            'ichimoku_signal': str(ichimoku['cloud_signal']),
-            'take_profit': float(take_profit_price),
-            'stop_loss': float(stop_loss_price),
-            'rsi_value': round(float(output.get('rsi', 50)), 2),
-            'confidence': int(output.get('confidence', 0)),
-            'confluence_score': int(confirmation_score),
-            'active_pivot_id': int(active_pivot['id']) if active_pivot else None,
-            'enneagram_state': int(enneagram_state),
-            'price_confluences': int(len(strong_zones)),
-            'time_confluences': int(len(time_windows)),
-            'gann_cycle_target': int(time_windows[0]['cycle_length']) if time_windows else 30,
-            'gann_sq9_levels': json.dumps(gann_sq9_levels_db),
-            'gann_angles_active': json.dumps(gann_angles_active_db),
-            'confluence_details': json.dumps(confluence_details_db),
+            # ================================================================
+            # LEGACY FIELDS (DB COMPATIBLE)
+            # ================================================================
+            "symbol": "BTCUSDT",
+            "signal_type": consensus['signal_type'],
+            "signal_date": signal_date_str,
+            "entry_price": round(current_price, 2),
+            "take_profit": targets['tp1'],
+            "stop_loss": targets['stop_loss'],
+            "confidence": consensus['weighted_score'],
+            "confluence_score": consensus['weighted_score'],
             
-            # ==================== EXTENDED DATA (for Telegram) ====================
-            'state': enneagram_state,
-            'state_name': state_info['name'],
-            'phase': state_info['phase'],
-            'state_confidence': state_confidence,
-            'target_state': target_state,
-            'target_state_name': target_info['name'],
-            'arrow': arrow_type,
+            # Integer fields
+            "active_pivot_id": len(df_daily) - 1,
+            "enneagram_state": weekly['enneagram_state'] if weekly else 9,
+            "price_confluences": targets['tp1_confluence_strength'],
+            "time_confluences": len(time_forecast['cycle_sources']),
+            "gann_cycle_target": time_forecast['days_to_pivot'],
             
-            'price_direction': price_direction_data['price_direction'],
-            'direction_emoji': price_direction_data['direction_emoji'],
-            'direction_probability': price_direction_data['direction_probability'],
-            'direction_reasoning': price_direction_data['direction_reasoning'],
-            'bullish_signals_count': price_direction_data['bullish_signals_count'],
-            'bearish_signals_count': price_direction_data['bearish_signals_count'],
-            'market_regime': market_regime,
+            # String fields
+            "enneagram_arrow": weekly['arrow_type'] if weekly else "NEUTRAL",
+            "macd_signal": str(round(weekly['macd'] if weekly else 0, 4)),
+            "ichimoku_signal": weekly['cloud_signal'] if weekly else "NEUTRAL",
             
-            'major_high': major_pivots['major_high'],
-            'major_low': major_pivots['major_low'],
-            'gann_range': major_pivots['range'],
-            'gann_eighths': gann_eighths,
-            'gann_3_8': gann_eighths['3/8']['price'],
-            'gann_4_8': gann_eighths['4/8']['price'],
-            'gann_5_8': gann_eighths['5/8']['price'],
+            # Numeric fields
+            "rsi_value": round(weekly['rsi'] if weekly else 50, 2),
             
-            'tenkan': ichimoku['tenkan'],
-            'kijun': ichimoku['kijun'],
-            'cloud_top': ichimoku['cloud_top'],
-            'cloud_bottom': ichimoku['cloud_bottom'],
-            'cloud_signal': ichimoku['cloud_signal'],
-            'tk_cross': ichimoku['tk_cross'],
-            'kijun_flat': ichimoku['kijun_flat'],
+            # JSON/Text fields
+            "gann_sq9_levels": json.dumps(sq9_analysis['from_current'][:4]),
+            "gann_angles_active": json.dumps([l['angle'] for l in sq9_analysis['from_current'] if abs(l['distance_up_pct']) < 5 or abs(l['distance_down_pct']) < 5]),
+            "confluence_details": json.dumps({
+                'score': consensus['weighted_score'],
+                'alignment': consensus['alignment_count'],
+                'sources': targets['tp1_sources']
+            }),
             
-            'confluence_zones': confluence_zones[:10],
-            'strong_confluence_zones': strong_zones[:5],
-            'key_zones': key_zones,
+            # ================================================================
+            # NEW MTF FIELDS
+            # ================================================================
+            "primary_direction": consensus['direction'],
+            "weighted_score": consensus['weighted_score'],
+            "mtf_alignment": consensus['alignment_count'],
+            "market_regime": regime['regime'],
             
-            'take_profit_zone': target_1,
-            'stop_loss_zone': invalidation,
-            'target_1': target_1,
-            'target_2': target_2,
-            'target_3': target_3,
+            # Full timeframe analysis
+            "timeframes": timeframes_clean,
             
-            'gann_time_windows': time_windows,
-            'pivot_forecast_primary': primary_pivot,
-            'price_time_forecast': price_time_forecast,
-            'active_pivot': {
-                'id': active_pivot['id'] if active_pivot else None,
-                'price': active_pivot['price'] if active_pivot else None,
-                'type': active_pivot['type'] if active_pivot else None,
-                'date': str(active_pivot['date']) if active_pivot else None
-            } if active_pivot else None,
+            # Consensus details
+            "consensus": consensus,
             
-            'confirmation_score_display': confirmation_score,
-            'score_breakdown': score_breakdown,
-            'signal_strength': signal_strength,
-            'strength_emoji': strength_emoji,
-            'position_advice': position_advice,
+            # Price targets
+            "price_targets": targets,
+            "target_1": targets['tp1'],
+            "target_2": targets['tp2'],
+            "target_3": targets['tp3'],
             
-            'signals_list': output.get('signals', []),
-            'signal_count': output.get('signal_count', 0),
+            # Time forecast
+            "time_forecast": time_forecast,
+            "pivot_forecast_primary": {
+                "date": time_forecast['next_pivot_date'],
+                "date_display": time_forecast['next_pivot_display'],
+                "days_from_now": time_forecast['days_to_pivot'],
+                "expected_pivot": time_forecast['pivot_type'],
+                "confidence": time_forecast['pivot_confidence'],
+                "cycle_type": time_forecast['cycle_sources'][0] if time_forecast['cycle_sources'] else "projection"
+            },
             
-            'adx_value': round(float(df['adx'].iloc[idx]), 2) if 'adx' in df.columns else 20.0,
-            'macd_value': round(output.get('macd', 0), 4),
-            'volume_ratio': round(output.get('volume_ratio', 1), 2),
-            'atr': round(atr_value, 2),
+            # Price-time forecast (legacy compatible)
+            "price_time_forecast": {
+                "days_to_pivot": time_forecast['days_to_pivot'],
+                "atr_daily": time_forecast['atr_daily'],
+                "max_expected_move": time_forecast['max_expected_move'],
+                "probable_price_low": time_forecast['probable_price_low'],
+                "probable_price_high": time_forecast['probable_price_high'],
+                "probable_range_text": time_forecast['probable_range_text'],
+                "target_1_reachable": abs(targets['tp1'] - current_price) < time_forecast['max_expected_move'],
+                "target_2_reachable": abs(targets['tp2'] - current_price) < time_forecast['max_expected_move'],
+                "target_3_reachable": abs(targets['tp3'] - current_price) < time_forecast['max_expected_move'],
+                "direction": consensus['direction']
+            },
             
-            'candles_analyzed': len(df),
-            'last_candle_date': str(df['date'].iloc[-1].date())
+            # Square of 9
+            "sq9_analysis": sq9_analysis,
+            
+            # Invalidation
+            "invalidation": invalidation,
+            
+            # Strategy
+            "strategy": strategy,
+            
+            # ================================================================
+            # LEGACY EXTENDED FIELDS
+            # ================================================================
+            "state": weekly['enneagram_state'] if weekly else 9,
+            "state_name": weekly['state_name'] if weekly else "Equilibrium",
+            "phase": weekly['state_phase'] if weekly else "Unknown",
+            "target_state": weekly['target_state'] if weekly else 9,
+            "target_state_name": weekly['target_state_name'] if weekly else "Equilibrium",
+            "arrow": weekly['arrow_type'] if weekly else "NEUTRAL",
+            "arrow_meaning": weekly['arrow_meaning'] if weekly else "",
+            
+            "price_direction": consensus['direction'],
+            "direction_emoji": "⬇️" if consensus['direction'] == "BEARISH" else ("⬆️" if consensus['direction'] == "BULLISH" else "➡️"),
+            "direction_probability": consensus['weighted_score'],
+            "direction_reasoning": f"{consensus['alignment_count']} timeframes aligned",
+            
+            "bullish_signals": sum(tf['bullish_signals'] for tf in tf_analyses.values() if tf),
+            "bearish_signals": sum(tf['bearish_signals'] for tf in tf_analyses.values() if tf),
+            
+            # Gann levels
+            "major_low": gann_levels['major_low'],
+            "major_high": gann_levels['major_high'],
+            "gann_range": gann_levels['range'],
+            "gann_3_8": gann_levels['3_8'],
+            "gann_4_8": gann_levels['4_8'],
+            "gann_5_8": gann_levels['5_8'],
+            
+            # Ichimoku
+            "tenkan": weekly['tenkan'] if weekly else current_price,
+            "kijun": weekly['kijun'] if weekly else current_price,
+            "cloud_top": weekly['cloud_top'] if weekly else current_price,
+            "cloud_bottom": weekly['cloud_bottom'] if weekly else current_price,
+            "cloud_signal": weekly['cloud_signal'] if weekly else "NEUTRAL",
+            "tk_cross": weekly['tk_cross'] if weekly else "NEUTRAL",
+            "kijun_flat": weekly['kijun_flat'] if weekly else False,
+            
+            # Trend
+            "adx": weekly['adx'] if weekly else 25,
+            "trend_strength": weekly['trend_strength'] if weekly else "MODERATE",
+            
+            # Regime
+            "regime": regime,
+            
+            # Additional indicators
+            "rsi": round(daily_tf['rsi'] if daily_tf else 50, 2),
+            "macd": round(weekly['macd'] if weekly else 0, 4),
+            "macd_hist": round(weekly['macd_histogram'] if weekly else 0, 4),
+            "atr": round(daily_tf['atr'] if daily_tf else current_price * 0.025, 2),
+            
+            # Metadata
+            "candles_analyzed": len(df_daily),
+            "last_candle_date": signal_date_str,
+            
+            # Legacy fields for Telegram
+            "signal_strength": consensus['confidence_level'],
+            "confirmation_score": consensus['weighted_score'],
+            "confirmation_score_display": f"{consensus['weighted_score']}%",
+            
+            # Active pivot
+            "active_pivot": {
+                "id": len(df_daily) - 1,
+                "date": signal_date_str,
+                "price": current_price,
+                "type": time_forecast['pivot_type']
+            },
+            
+            # Strong confluence zones for Telegram
+            "strong_confluence_zones": [
+                {"price": targets['tp1'], "type": "TARGET", "sources": targets['tp1_sources']},
+                {"price": targets['stop_loss'], "type": "STOP", "sources": targets['stop_sources']}
+            ],
+            
+            # Gann time windows for legacy
+            "gann_time_windows": [
+                {
+                    "cycle_length": time_forecast['days_to_pivot'],
+                    "target_date": time_forecast['next_pivot_date'],
+                    "date_display": time_forecast['next_pivot_display'],
+                    "days_from_now": time_forecast['days_to_pivot']
+                }
+            ]
         }
         
-        print("\n" + "="*80)
-        print("[SUCCESS] INVINCIBLE SIGNAL GENERATED v4.0.6")
-        print(f"State: {enneagram_state} → {target_state} ({state_info['name']} to {target_info['name']})")
-        print(f"Direction: {price_direction_data['price_direction']} {price_direction_data['direction_probability']}%")
-        print(f"Confirmation: {confirmation_score}% ({signal_strength})")
-        print(f"Target 1: ${take_profit_price:.2f} - {target_1_status}")
-        print(f"Invalidation: ${stop_loss_price:.2f}")
-        print(f"Pivot: {primary_pivot['date_display']} ({days_to_pivot} days)")
-        print(f"Range by pivot: ${probable_price_low:.0f} - ${probable_price_high:.0f}")
-        print("="*80 + "\n")
-        sys.stdout.flush()
+        # Print summary
+        print("\n" + "="*70)
+        print("  SIGNAL SUMMARY")
+        print("="*70)
+        print(f"  Symbol: BTCUSDT")
+        print(f"  Price:  ${current_price:,.2f}")
+        print(f"  Signal: {consensus['signal_type']}")
+        print(f"  Direction: {consensus['direction']} ({consensus['weighted_score']}%)")
+        print(f"  Alignment: {consensus['alignment_count']}")
+        print(f"  Regime: {regime['regime']}")
+        print(f"")
+        print(f"  Timeframe Breakdown:")
+        print(f"    1M: {tf_analyses['1M']['direction'] if tf_analyses.get('1M') else 'N/A'} (40%)")
+        print(f"    1W: {tf_analyses['1W']['direction'] if tf_analyses.get('1W') else 'N/A'} (35%)")
+        print(f"    3D: {tf_analyses['3D']['direction'] if tf_analyses.get('3D') else 'N/A'} (15%)")
+        print(f"    1D: {tf_analyses['1D']['direction'] if tf_analyses.get('1D') else 'N/A'} (10%)")
+        print(f"")
+        print(f"  Targets:")
+        print(f"    TP1: ${targets['tp1']:,.2f}")
+        print(f"    TP2: ${targets['tp2']:,.2f}")
+        print(f"    TP3: ${targets['tp3']:,.2f}")
+        print(f"    SL:  ${targets['stop_loss']:,.2f}")
+        print(f"")
+        print(f"  Time Forecast:")
+        print(f"    Next Pivot: {time_forecast['next_pivot_display']} ({time_forecast['pivot_type']})")
+        print(f"    Probable Range: {time_forecast['probable_range_text']}")
+        print(f"")
+        print(f"  Strategy: {strategy['action']}")
+        print("="*70 + "\n")
         
-        return sanitize_for_json(response_data)
+        return response_data
         
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"\n[ERROR] {str(e)}")
+        print(f"[ERROR] Signal generation failed: {e}")
+        import traceback
         traceback.print_exc()
-        sys.stdout.flush()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint"""
     return {
-        'status': 'healthy',
-        'service': 'LUXOR V7 PRANA Runtime',
-        'version': '4.0.6',
-        'edition': 'INVINCIBLE',
-        'timestamp': datetime.now().isoformat()
+        "status": "healthy",
+        "version": "5.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "system": "LUXOR V7 PRANA - MULTI-TIMEFRAME EDITION"
     }
 
 
 @app.on_event("startup")
-async def startup_event():
-    """Startup event handler."""
-    print("\n" + "="*80)
-    print("  LUXOR V7 PRANA RUNTIME - INVINCIBLE EDITION v4.0.6")
-    print("  Enneagram-Gann Integration System with Price-Time Forecast")
-    print("  DB Schema Compatible - All Field Types Matched")
-    print("="*80)
-    print(f"  Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("  Endpoints:")
-    print("    - GET /signal/daily  : Generate daily trading signal")
-    print("    - GET /health        : Health check")
-    print("="*80 + "\n")
-    sys.stdout.flush()
+async def startup():
+    print("\n" + "="*70)
+    print("  LUXOR V7 PRANA RUNTIME - MULTI-TIMEFRAME EDITION")
+    print("  Version 5.0.0")
+    print("  ")
+    print("  Timeframe Weights:")
+    print(f"    Monthly (1M): {TIMEFRAME_WEIGHTS['1M']}%")
+    print(f"    Weekly (1W):  {TIMEFRAME_WEIGHTS['1W']}%")
+    print(f"    3-Day (3D):   {TIMEFRAME_WEIGHTS['3D']}%")
+    print(f"    Daily (1D):   {TIMEFRAME_WEIGHTS['1D']}%")
+    print("  ")
+    print("  Gann Principle: Higher timeframes dominate")
+    print("  Starting up...")
+    print("="*70 + "\n")
 
 
 if __name__ == "__main__":
