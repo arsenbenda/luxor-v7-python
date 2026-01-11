@@ -1,7 +1,12 @@
 """
 LUXOR V7 PRANA RUNTIME - MULTI-TIMEFRAME EDITION
-Version: 5.0.2
-Fixed: Gann calculations, weighted scoring, direction classification, alignment count, R:R ratio
+Version: 5.0.3
+Fixed: 
+- Gann levels use recent range (not all-time)
+- Invalidation blocks signal when triggered
+- Monthly cloud ignored (too displaced)
+- Time forecast capped to realistic range
+- tf_name passed to all relevant functions
 """
 
 from fastapi import FastAPI, HTTPException
@@ -23,7 +28,7 @@ API_PORT = 8000
 # Initialize FastAPI
 app = FastAPI(
     title="LUXOR V7 PRANA RUNTIME - MTF EDITION",
-    version="5.0.2",
+    version="5.0.3",
     description="Multi-Timeframe Gann + Ichimoku + Enneagram Analysis"
 )
 
@@ -54,6 +59,14 @@ ICHIMOKU_PARAMS = {
     '3D': (9, 26, 52),
     '1W': (9, 26, 26),
     '1M': (9, 26, 52)
+}
+
+# Gann lookback periods per timeframe
+GANN_LOOKBACK = {
+    '1D': 252,   # ~1 year of daily candles
+    '3D': 120,   # ~1 year of 3-day candles
+    '1W': 52,    # 1 year of weekly candles
+    '1M': 24     # 2 years of monthly candles
 }
 
 ENNEAGRAM_STATES = {
@@ -155,7 +168,7 @@ def resample_ohlcv(df, timeframe):
         '1D': '1D',
         '3D': '3D',
         '1W': 'W',
-        '1M': 'M'  # Changed from 'ME' for pandas 1.x compatibility
+        '1M': 'M'
     }
     
     freq = freq_map.get(timeframe, '1D')
@@ -163,12 +176,10 @@ def resample_ohlcv(df, timeframe):
     try:
         df_copy = df.copy()
         
-        # Ensure datetime index
         if 'date' in df_copy.columns:
             df_copy['date'] = pd.to_datetime(df_copy['date'])
             df_copy.set_index('date', inplace=True)
         
-        # Resample
         resampled = df_copy.resample(freq).agg({
             'open': 'first',
             'high': 'max',
@@ -251,25 +262,21 @@ def calculate_adx(df, period=14):
     low = df['low']
     close = df['close']
     
-    # Calculate +DM and -DM
     plus_dm = high.diff()
     minus_dm = -low.diff()
     
     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
     minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
     
-    # Calculate TR
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Smooth
     atr = tr.rolling(window=period).mean()
     plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
     minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
     
-    # Calculate DX and ADX
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1)
     adx = dx.rolling(window=period).mean()
     
@@ -309,22 +316,17 @@ def calculate_ichimoku(df, params=(9, 26, 52)):
     low = df['low']
     close = df['close']
     
-    # Tenkan-sen (Conversion Line)
     tenkan = (high.rolling(window=tenkan_period).max() + 
               low.rolling(window=tenkan_period).min()) / 2
     
-    # Kijun-sen (Base Line)
     kijun = (high.rolling(window=kijun_period).max() + 
              low.rolling(window=kijun_period).min()) / 2
     
-    # Senkou Span A (Leading Span A)
     senkou_a = ((tenkan + kijun) / 2).shift(kijun_period)
     
-    # Senkou Span B (Leading Span B)
     senkou_b = ((high.rolling(window=senkou_period).max() + 
                  low.rolling(window=senkou_period).min()) / 2).shift(kijun_period)
     
-    # Current values
     current_close = safe_float(close.iloc[-1])
     current_tenkan = safe_float(tenkan.iloc[-1])
     current_kijun = safe_float(kijun.iloc[-1])
@@ -334,7 +336,6 @@ def calculate_ichimoku(df, params=(9, 26, 52)):
     cloud_top = max(current_senkou_a, current_senkou_b)
     cloud_bottom = min(current_senkou_a, current_senkou_b)
     
-    # Cloud signal
     if current_close > cloud_top:
         cloud_signal = 'BULLISH'
     elif current_close < cloud_bottom:
@@ -342,7 +343,6 @@ def calculate_ichimoku(df, params=(9, 26, 52)):
     else:
         cloud_signal = 'NEUTRAL'
     
-    # TK Cross
     prev_tenkan = safe_float(tenkan.iloc[-2]) if len(tenkan) > 1 else current_tenkan
     prev_kijun = safe_float(kijun.iloc[-2]) if len(kijun) > 1 else current_kijun
     
@@ -357,7 +357,6 @@ def calculate_ichimoku(df, params=(9, 26, 52)):
     else:
         tk_cross = 'NEUTRAL'
     
-    # Kijun flat detection (potential support/resistance)
     kijun_flat = False
     if len(kijun) >= 5:
         recent_kijun = kijun.iloc[-5:]
@@ -377,13 +376,19 @@ def calculate_ichimoku(df, params=(9, 26, 52)):
     }
 
 # ============================================================
-# GANN CALCULATIONS - FIXED v5.0.2
+# GANN CALCULATIONS - FIXED v5.0.3
 # ============================================================
 
-def calculate_gann_levels_for_timeframe(df):
+def calculate_gann_levels_for_timeframe(df, tf_name='1D'):
     """
     Calculate Gann Rule of Eighths for a specific timeframe
-    Uses the HIGH and LOW of the entire timeframe dataset
+    Uses RECENT range based on timeframe lookback, not all-time data
+    
+    Lookback periods:
+    - 1D: 252 trading days (~1 year)
+    - 3D: 120 candles (~1 year)
+    - 1W: 52 weeks (~1 year)
+    - 1M: 24 months (~2 years)
     """
     if df is None or df.empty:
         return {
@@ -392,23 +397,33 @@ def calculate_gann_levels_for_timeframe(df):
             '4_8': 0, '5_8': 0, '6_8': 0, '7_8': 0, '8_8': 0
         }
     
-    high = safe_float(df['high'].max())
-    low = safe_float(df['low'].min())
+    # Get lookback period for this timeframe
+    lookback = GANN_LOOKBACK.get(tf_name, 252)
+    
+    # Use only recent data (not all-time)
+    recent_df = df.tail(lookback)
+    
+    high = safe_float(recent_df['high'].max())
+    low = safe_float(recent_df['low'].min())
     range_val = high - low
+    
+    # Prevent division issues
+    if range_val <= 0:
+        range_val = high * 0.1
     
     return {
         'high': high,
         'low': low,
         'range': range_val,
-        '0_8': low,                           # 0% - Major Low
-        '1_8': low + range_val * 0.125,       # 12.5%
-        '2_8': low + range_val * 0.25,        # 25%
-        '3_8': low + range_val * 0.375,       # 37.5%
-        '4_8': low + range_val * 0.5,         # 50% - KEY LEVEL
-        '5_8': low + range_val * 0.625,       # 62.5%
-        '6_8': low + range_val * 0.75,        # 75%
-        '7_8': low + range_val * 0.875,       # 87.5%
-        '8_8': high                           # 100% - Major High
+        '0_8': low,
+        '1_8': low + range_val * 0.125,
+        '2_8': low + range_val * 0.25,
+        '3_8': low + range_val * 0.375,
+        '4_8': low + range_val * 0.5,
+        '5_8': low + range_val * 0.625,
+        '6_8': low + range_val * 0.75,
+        '7_8': low + range_val * 0.875,
+        '8_8': high
     }
 
 def calculate_square_of_9(base_price):
@@ -448,28 +463,27 @@ def identify_enneagram_state(df, rsi, macd_hist, volume_ratio=1.0):
     prev_close = df['close'].iloc[-20]
     price_change_pct = ((close - prev_close) / prev_close) * 100
     
-    # State determination logic
     if rsi < 30 and macd_hist < 0:
-        state = 5  # Capitulation
+        state = 5
     elif rsi < 35 and macd_hist > 0:
-        state = 6  # Recovery
+        state = 6
     elif rsi > 70 and macd_hist > 0:
-        state = 3  # Markup
+        state = 3
     elif rsi > 65 and macd_hist < 0:
-        state = 8  # Distribution
+        state = 8
     elif 40 <= rsi <= 60 and abs(macd_hist) < abs(df['close'].mean() * 0.01):
         if price_change_pct > 2:
-            state = 2  # Accumulation
+            state = 2
         elif price_change_pct < -2:
-            state = 4  # Retracement
+            state = 4
         else:
-            state = 1  # Initiation
+            state = 1
     elif rsi > 55 and macd_hist > 0:
-        state = 7  # Expansion
+        state = 7
     elif rsi < 45 and macd_hist < 0:
-        state = 9  # Completion
+        state = 9
     else:
-        state = 1  # Default to Initiation
+        state = 1
     
     return state, ENNEAGRAM_STATES[state]
 
@@ -478,20 +492,17 @@ def determine_arrow(state, rsi, macd_hist, prev_rsi=None):
     if prev_rsi is None:
         prev_rsi = rsi
     
-    # GROWTH: improving conditions
-    # STRESS: deteriorating conditions
-    
-    if state in [2, 3, 6, 7]:  # Bullish states
+    if state in [2, 3, 6, 7]:
         if rsi > prev_rsi and macd_hist > 0:
             arrow = 'GROWTH'
         else:
             arrow = 'STRESS'
-    elif state in [5, 8, 9]:  # Bearish states
+    elif state in [5, 8, 9]:
         if rsi < prev_rsi and macd_hist < 0:
             arrow = 'STRESS'
         else:
             arrow = 'GROWTH'
-    else:  # Neutral states (1, 4)
+    else:
         if macd_hist > 0:
             arrow = 'GROWTH'
         else:
@@ -502,30 +513,34 @@ def determine_arrow(state, rsi, macd_hist, prev_rsi=None):
     return arrow, meaning
 
 # ============================================================
-# DIRECTION CLASSIFICATION - FIXED v5.0.2
+# DIRECTION CLASSIFICATION - FIXED v5.0.3
 # ============================================================
 
-def classify_timeframe_direction(rsi, adx, cloud_signal, tk_cross, macd_hist, kijun_flat=False):
+def classify_timeframe_direction(rsi, adx, cloud_signal, tk_cross, macd_hist, kijun_flat=False, tf_name='1D'):
     """
     Classify direction for a timeframe based on multiple indicators
-    Returns: direction, bullish_count, bearish_count
     
-    FIXED: Now properly weights signals and handles oversold/overbought in trends
+    FIXED v5.0.3: 
+    - Monthly uses TK cross only (cloud too displaced - 26 months!)
+    - RSI properly weighted in trend context
     """
     bullish = 0
     bearish = 0
     
     # 1. Cloud Signal (HEAVY WEIGHT - 2 points)
-    if cloud_signal == 'BULLISH':
-        bullish += 2
-    elif cloud_signal == 'BEARISH':
-        bearish += 2
+    # SKIP cloud for monthly - 26-month displacement is too old to be relevant
+    if tf_name != '1M':
+        if cloud_signal == 'BULLISH':
+            bullish += 2
+        elif cloud_signal == 'BEARISH':
+            bearish += 2
     
-    # 2. TK Cross (1 point)
+    # 2. TK Cross (1 point normally, 2 for monthly since cloud skipped)
+    tk_weight = 2 if tf_name == '1M' else 1
     if tk_cross == 'BULLISH':
-        bullish += 1
+        bullish += tk_weight
     elif tk_cross == 'BEARISH':
-        bearish += 1
+        bearish += tk_weight
     
     # 3. MACD Histogram (1 point)
     if macd_hist > 0:
@@ -534,38 +549,30 @@ def classify_timeframe_direction(rsi, adx, cloud_signal, tk_cross, macd_hist, ki
         bearish += 1
     
     # 4. RSI with TREND CONTEXT (1 point)
-    # In a downtrend (cloud bearish), oversold RSI confirms bearish, not bullish
-    # In an uptrend (cloud bullish), overbought RSI confirms bullish, not bearish
-    if cloud_signal == 'BEARISH':
-        if rsi < 40:  # Oversold in downtrend = bearish momentum
+    if cloud_signal == 'BEARISH' or (tf_name == '1M' and tk_cross == 'BEARISH'):
+        if rsi < 40:
             bearish += 1
-        elif rsi > 60:  # Strength in downtrend = potential reversal
+        elif rsi > 60:
             bullish += 1
-    elif cloud_signal == 'BULLISH':
-        if rsi > 60:  # Overbought in uptrend = bullish momentum
+    elif cloud_signal == 'BULLISH' or (tf_name == '1M' and tk_cross == 'BULLISH'):
+        if rsi > 60:
             bullish += 1
-        elif rsi < 40:  # Weakness in uptrend = potential reversal
+        elif rsi < 40:
             bearish += 1
-    else:  # Neutral cloud
+    else:
         if rsi > 60:
             bullish += 1
         elif rsi < 40:
             bearish += 1
     
-    # 5. ADX shows trend STRENGTH, not direction
-    # Strong trend (ADX > 25) amplifies the dominant signal
-    if adx > 40:  # Very strong trend
+    # 5. ADX amplifies dominant signal
+    if adx > 40:
         if bullish > bearish:
             bullish += 1
         elif bearish > bullish:
             bearish += 1
     
-    # 6. Kijun Flat (potential support/resistance)
-    if kijun_flat:
-        # Flat Kijun often acts as magnet - slight neutral bias
-        pass  # No change, but note it
-    
-    # Determine direction - need CLEAR majority
+    # Determine direction - need CLEAR majority (60%+)
     total_signals = bullish + bearish
     
     if total_signals == 0:
@@ -574,7 +581,6 @@ def classify_timeframe_direction(rsi, adx, cloud_signal, tk_cross, macd_hist, ki
     bullish_pct = bullish / total_signals * 100
     bearish_pct = bearish / total_signals * 100
     
-    # Need > 60% for clear direction
     if bullish_pct >= 60:
         return 'BULLISH', bullish, bearish
     elif bearish_pct >= 60:
@@ -583,17 +589,12 @@ def classify_timeframe_direction(rsi, adx, cloud_signal, tk_cross, macd_hist, ki
         return 'NEUTRAL', bullish, bearish
 
 # ============================================================
-# CONSENSUS CALCULATION - FIXED v5.0.2
+# CONSENSUS CALCULATION - FIXED v5.0.3
 # ============================================================
 
 def calculate_consensus(timeframes):
     """
     Calculate weighted consensus across timeframes
-    
-    FIXED: 
-    - Proper weighted contribution calculation
-    - Correct alignment count
-    - Primary direction from weighted scores
     """
     total_bullish_weight = 0
     total_bearish_weight = 0
@@ -614,15 +615,13 @@ def calculate_consensus(timeframes):
         elif direction == 'BEARISH':
             total_bearish_weight += weight
             tf_data['weighted_contribution'] = weight
-        else:  # NEUTRAL
+        else:
             tf_data['weighted_contribution'] = 0
     
-    # Calculate percentages
     bullish_pct = (total_bullish_weight / total_weight) * 100 if total_weight > 0 else 0
     bearish_pct = (total_bearish_weight / total_weight) * 100 if total_weight > 0 else 0
     neutral_pct = 100 - bullish_pct - bearish_pct
     
-    # Determine primary direction
     if bullish_pct > bearish_pct and bullish_pct >= 40:
         primary_direction = 'BULLISH'
         weighted_score = bullish_pct
@@ -633,7 +632,6 @@ def calculate_consensus(timeframes):
         primary_direction = 'NEUTRAL'
         weighted_score = max(bullish_pct, bearish_pct)
     
-    # Count alignment - how many TFs match primary direction
     if primary_direction == 'NEUTRAL':
         aligned_count = sum(1 for d in directions.values() if d == 'NEUTRAL')
     else:
@@ -642,10 +640,8 @@ def calculate_consensus(timeframes):
     total_tfs = len(timeframes)
     alignment_str = f"{aligned_count}/{total_tfs}"
     
-    # Alignment detail
     alignment_detail = ", ".join([f"{tf}:{dir}" for tf, dir in directions.items()])
     
-    # Confidence level
     if weighted_score >= 70 and aligned_count >= 3:
         confidence = 'HIGH'
     elif weighted_score >= 50 and aligned_count >= 2:
@@ -653,7 +649,6 @@ def calculate_consensus(timeframes):
     else:
         confidence = 'LOW'
     
-    # Signal type
     if primary_direction == 'BULLISH' and confidence in ['HIGH', 'MEDIUM']:
         signal_type = 'BUY'
     elif primary_direction == 'BEARISH' and confidence in ['HIGH', 'MEDIUM']:
@@ -661,7 +656,6 @@ def calculate_consensus(timeframes):
     else:
         signal_type = 'WAIT'
     
-    # Interpretation
     monthly_dir = directions.get('1M', 'NEUTRAL')
     weekly_dir = directions.get('1W', 'NEUTRAL')
     daily_dir = directions.get('1D', 'NEUTRAL')
@@ -692,11 +686,41 @@ def calculate_consensus(timeframes):
         'monthly_direction': monthly_dir,
         'weekly_direction': weekly_dir,
         'daily_direction': daily_dir,
-        'interpretation': interpretation
+        'interpretation': interpretation,
+        'is_valid': True  # Will be updated by validate_setup
     }
 
 # ============================================================
-# RISK:REWARD CALCULATION - NEW v5.0.2
+# SETUP VALIDATION - NEW v5.0.3
+# ============================================================
+
+def validate_setup(invalidation, consensus):
+    """
+    Check if setup is still valid (no invalidation rules triggered)
+    Returns modified consensus if invalid
+    """
+    rules_triggered = invalidation.get('rules_triggered', 0)
+    
+    if rules_triggered > 0:
+        triggered_rules = [r['condition'] for r in invalidation.get('rules', []) if r.get('triggered', False)]
+        return {
+            **consensus,
+            'direction': 'INVALID',
+            'signal_type': 'NO_TRADE',
+            'confidence_level': 'NONE',
+            'weighted_score': 0,
+            'interpretation': f"Setup invalidated: {', '.join(triggered_rules)}. Stay flat until new setup forms.",
+            'is_valid': False,
+            'invalidation_reason': triggered_rules
+        }
+    
+    return {
+        **consensus,
+        'is_valid': True
+    }
+
+# ============================================================
+# RISK:REWARD CALCULATION
 # ============================================================
 
 def calculate_risk_reward(entry, target, stop):
@@ -715,14 +739,12 @@ def calculate_risk_reward(entry, target, stop):
     return safe_round(rr_ratio, 2), safe_round(reward_pct, 2), safe_round(risk_pct, 2)
 
 # ============================================================
-# PRICE TARGETS & STOP LOSS - FIXED v5.0.2
+# PRICE TARGETS & STOP LOSS
 # ============================================================
 
 def calculate_targets_and_stops(current_price, direction, gann_levels_by_tf, ichimoku_by_tf, atr):
     """
     Calculate TP and SL based on timeframe-specific levels
-    
-    FIXED: Proper source tracking and level selection
     """
     targets = {
         'tp1': None, 'tp1_sources': [],
@@ -734,42 +756,53 @@ def calculate_targets_and_stops(current_price, direction, gann_levels_by_tf, ich
     resistance_levels = []
     support_levels = []
     
-    # Collect levels from each timeframe
     for tf_name in ['1M', '1W', '3D', '1D']:
         gann = gann_levels_by_tf.get(tf_name, {})
         ichi = ichimoku_by_tf.get(tf_name, {})
         
-        # Gann levels
         for level_name in ['3_8', '4_8', '5_8', '6_8', '7_8']:
             level_val = gann.get(level_name, 0)
             if level_val > 0:
                 source = f"GANN_{level_name}_{tf_name}"
-                if level_val > current_price:
+                if level_val > current_price * 1.005:  # 0.5% buffer
                     resistance_levels.append({'price': level_val, 'source': source, 'tf': tf_name})
-                else:
+                elif level_val < current_price * 0.995:
                     support_levels.append({'price': level_val, 'source': source, 'tf': tf_name})
         
-        # Ichimoku levels
         cloud_top = ichi.get('cloud_top', 0)
         cloud_bottom = ichi.get('cloud_bottom', 0)
         kijun = ichi.get('kijun', 0)
         
-        if cloud_top > current_price:
+        if cloud_top > current_price * 1.005:
             resistance_levels.append({'price': cloud_top, 'source': f'CLOUD_TOP_{tf_name}', 'tf': tf_name})
-        if cloud_bottom < current_price:
+        if cloud_bottom > 0 and cloud_bottom < current_price * 0.995:
             support_levels.append({'price': cloud_bottom, 'source': f'CLOUD_BOTTOM_{tf_name}', 'tf': tf_name})
         if kijun > 0:
-            if kijun > current_price:
+            if kijun > current_price * 1.005:
                 resistance_levels.append({'price': kijun, 'source': f'KIJUN_{tf_name}', 'tf': tf_name})
-            else:
+            elif kijun < current_price * 0.995:
                 support_levels.append({'price': kijun, 'source': f'KIJUN_{tf_name}', 'tf': tf_name})
     
-    # Sort levels
     resistance_levels.sort(key=lambda x: x['price'])
     support_levels.sort(key=lambda x: x['price'], reverse=True)
     
+    # Remove duplicates (within 0.5% of each other)
+    def dedupe_levels(levels):
+        if not levels:
+            return levels
+        result = [levels[0]]
+        for level in levels[1:]:
+            if abs(level['price'] - result[-1]['price']) / result[-1]['price'] > 0.005:
+                result.append(level)
+            else:
+                # Merge sources
+                result[-1]['source'] += f" + {level['source']}"
+        return result
+    
+    resistance_levels = dedupe_levels(resistance_levels)
+    support_levels = dedupe_levels(support_levels)
+    
     if direction == 'BULLISH' or direction == 'NEUTRAL':
-        # Targets are resistance levels above price
         if len(resistance_levels) >= 1:
             targets['tp1'] = resistance_levels[0]['price']
             targets['tp1_sources'] = [resistance_levels[0]['source']]
@@ -780,13 +813,11 @@ def calculate_targets_and_stops(current_price, direction, gann_levels_by_tf, ich
             targets['tp3'] = resistance_levels[2]['price']
             targets['tp3_sources'] = [resistance_levels[2]['source']]
         
-        # Stop is support below price
         if len(support_levels) >= 1:
             targets['stop_loss'] = support_levels[0]['price']
             targets['stop_sources'] = [support_levels[0]['source']]
     
     else:  # BEARISH
-        # Targets are support levels below price
         if len(support_levels) >= 1:
             targets['tp1'] = support_levels[0]['price']
             targets['tp1_sources'] = [support_levels[0]['source']]
@@ -797,12 +828,11 @@ def calculate_targets_and_stops(current_price, direction, gann_levels_by_tf, ich
             targets['tp3'] = support_levels[2]['price']
             targets['tp3_sources'] = [support_levels[2]['source']]
         
-        # Stop is resistance above price
         if len(resistance_levels) >= 1:
             targets['stop_loss'] = resistance_levels[0]['price']
             targets['stop_sources'] = [resistance_levels[0]['source']]
     
-    # Fallback to ATR-based if no levels found
+    # Fallback to ATR-based
     if targets['tp1'] is None:
         targets['tp1'] = current_price + (atr * 2 if direction != 'BEARISH' else -atr * 2)
         targets['tp1_sources'] = ['ATR_2X']
@@ -819,27 +849,28 @@ def calculate_targets_and_stops(current_price, direction, gann_levels_by_tf, ich
     return targets
 
 # ============================================================
-# TIME FORECAST
+# TIME FORECAST - FIXED v5.0.3
 # ============================================================
 
-def calculate_time_forecast(df, current_price, atr):
-    """Calculate time-based pivot forecasts using Gann cycles"""
+def calculate_time_forecast(df, current_price, atr, gann_levels_1w):
+    """
+    Calculate time-based pivot forecasts using Gann cycles
+    
+    FIXED v5.0.3: Cap range to realistic bounds using Gann levels
+    """
     if df is None or df.empty:
         return {}
     
     last_date = pd.to_datetime(df['date'].iloc[-1])
     
-    # Gann time cycles (in days)
     cycles = [30, 45, 60, 90, 120, 180, 360]
     
-    # Find recent pivots
     highs = df.nlargest(5, 'high')
     lows = df.nsmallest(5, 'low')
     
     pivot_forecasts = []
     
     for cycle in cycles:
-        # Project from recent high
         if not highs.empty:
             high_date = pd.to_datetime(highs['date'].iloc[0])
             projected_date = high_date + timedelta(days=cycle)
@@ -855,10 +886,8 @@ def calculate_time_forecast(df, current_price, atr):
                         'confidence': 50 if cycle in [45, 90, 180] else 30
                     })
     
-    # Sort by days from now
     pivot_forecasts.sort(key=lambda x: x['days_from_now'])
     
-    # Get primary pivot
     primary_pivot = pivot_forecasts[0] if pivot_forecasts else {
         'date': (last_date + timedelta(days=30)).strftime('%Y-%m-%d'),
         'date_display': (last_date + timedelta(days=30)).strftime('%d/%m/%Y'),
@@ -868,9 +897,28 @@ def calculate_time_forecast(df, current_price, atr):
         'confidence': 20
     }
     
-    # Calculate price range by pivot
     days_to_pivot = primary_pivot['days_from_now']
-    max_move = atr * days_to_pivot * 0.7  # 70% efficiency factor
+    
+    # ATR-based projection
+    max_move = atr * days_to_pivot * 0.7
+    
+    # Calculate raw bounds
+    raw_high = current_price + max_move
+    raw_low = current_price - max_move
+    
+    # CAP to Gann levels for realistic bounds
+    gann_high = gann_levels_1w.get('7_8', raw_high)  # 87.5% level
+    gann_low = gann_levels_1w.get('2_8', raw_low)    # 25% level
+    
+    # Don't exceed Gann bounds by more than 5%
+    probable_high = min(raw_high, gann_high * 1.05)
+    probable_low = max(raw_low, gann_low * 0.95)
+    
+    # Ensure we have at least some range
+    if probable_high <= current_price:
+        probable_high = current_price * 1.10
+    if probable_low >= current_price:
+        probable_low = current_price * 0.90
     
     return {
         'next_pivot_date': primary_pivot['date'],
@@ -879,22 +927,21 @@ def calculate_time_forecast(df, current_price, atr):
         'pivot_type': 'HIGH' if primary_pivot['from'] == 'HIGH' else 'LOW',
         'pivot_confidence': primary_pivot['confidence'],
         'cycle_sources': [f"{primary_pivot['cycle']} from {primary_pivot['from']}"],
-        'probable_price_low': safe_round(current_price - max_move),
-        'probable_price_high': safe_round(current_price + max_move),
-        'probable_range_text': f"${safe_round(current_price - max_move):,.0f} - ${safe_round(current_price + max_move):,.0f}",
+        'probable_price_low': safe_round(probable_low),
+        'probable_price_high': safe_round(probable_high),
+        'probable_range_text': f"${safe_round(probable_low):,.0f} - ${safe_round(probable_high):,.0f}",
         'atr_daily': safe_round(atr),
         'max_expected_move': safe_round(max_move)
     }
 
 # ============================================================
-# INVALIDATION RULES - FIXED v5.0.2
+# INVALIDATION RULES - FIXED v5.0.3
 # ============================================================
 
 def build_invalidation_rules(direction, current_price, gann_levels, ichimoku, rsi):
     """
     Build invalidation rules based on current state
-    
-    FIXED: Check if conditions are already triggered
+    Checks if conditions are already triggered
     """
     rules = []
     
@@ -902,52 +949,63 @@ def build_invalidation_rules(direction, current_price, gann_levels, ichimoku, rs
     cloud_bottom = ichimoku.get('cloud_bottom', 0)
     cloud_top = ichimoku.get('cloud_top', 0)
     gann_50 = gann_levels.get('4_8', 0)
+    gann_38 = gann_levels.get('3_8', 0)
+    gann_62 = gann_levels.get('5_8', 0)
     
     if direction == 'BULLISH':
-        # Bullish invalidation: price breaks below key supports
-        invalidation_price = cloud_bottom if cloud_bottom > 0 else gann_levels.get('3_8', current_price * 0.95)
+        # Use the nearest SUPPORT level below price
+        invalidation_price = max(
+            cloud_bottom if cloud_bottom > 0 and cloud_bottom < current_price else 0,
+            gann_38 if gann_38 < current_price else 0
+        )
+        if invalidation_price == 0:
+            invalidation_price = current_price * 0.95
+        
+        rules.append({
+            'condition': 'Daily close below Gann 3/8',
+            'price': safe_round(gann_38),
+            'triggered': current_price < gann_38 if gann_38 > 0 else False
+        })
         
         rules.append({
             'condition': 'Daily close below cloud bottom',
             'price': safe_round(cloud_bottom),
-            'triggered': current_price < cloud_bottom
+            'triggered': current_price < cloud_bottom if cloud_bottom > 0 else False
         })
         
         rules.append({
-            'condition': 'Weekly close below Gann 50%',
-            'price': safe_round(gann_50),
-            'triggered': current_price < gann_50
-        })
-        
-        rules.append({
-            'condition': 'RSI breaks below 40',
+            'condition': 'RSI breaks below 35',
             'current': safe_round(rsi),
-            'triggered': rsi < 40
+            'triggered': rsi < 35
         })
         
     else:  # BEARISH or NEUTRAL
-        # Bearish invalidation: price breaks above key resistances
-        invalidation_price = cloud_top if cloud_top > 0 else gann_levels.get('5_8', current_price * 1.05)
+        # Use the nearest RESISTANCE level above price
+        invalidation_price = min(
+            cloud_top if cloud_top > current_price else float('inf'),
+            gann_62 if gann_62 > current_price else float('inf')
+        )
+        if invalidation_price == float('inf'):
+            invalidation_price = current_price * 1.05
+        
+        rules.append({
+            'condition': 'Daily close above Gann 5/8',
+            'price': safe_round(gann_62),
+            'triggered': current_price > gann_62 if gann_62 > 0 else False
+        })
         
         rules.append({
             'condition': 'Daily close above cloud top',
             'price': safe_round(cloud_top),
-            'triggered': current_price > cloud_top
+            'triggered': current_price > cloud_top if cloud_top > 0 else False
         })
         
         rules.append({
-            'condition': 'Weekly close above Gann 50%',
-            'price': safe_round(gann_50),
-            'triggered': current_price > gann_50
-        })
-        
-        rules.append({
-            'condition': 'RSI breaks above 60',
+            'condition': 'RSI breaks above 65',
             'current': safe_round(rsi),
-            'triggered': rsi > 60
+            'triggered': rsi > 65
         })
     
-    # Check if any rules already triggered
     triggered_count = sum(1 for r in rules if r.get('triggered', False))
     
     return {
@@ -955,7 +1013,7 @@ def build_invalidation_rules(direction, current_price, gann_levels, ichimoku, rs
         'invalidation_reason': 'Key level breach',
         'rules': rules,
         'rules_triggered': triggered_count,
-        'warning': f"{triggered_count} invalidation rules already triggered!" if triggered_count > 0 else None
+        'warning': f"⚠️ {triggered_count} invalidation rule(s) already triggered!" if triggered_count > 0 else None
     }
 
 # ============================================================
@@ -1001,23 +1059,34 @@ def detect_market_regime(current_price, sma_200, adx, adx_strength):
     }
 
 # ============================================================
-# STRATEGY GENERATION
+# STRATEGY GENERATION - FIXED v5.0.3
 # ============================================================
 
 def generate_strategy(consensus, invalidation, timeframes, current_price):
     """Generate trading strategy based on analysis"""
+    
+    # Check if setup is invalid
+    if not consensus.get('is_valid', True):
+        return {
+            'primary_bias': 'FLAT',
+            'action': 'No trade - setup already invalidated',
+            'entry_method': 'Wait for new setup to form',
+            'position_size_recommendation': 'Zero (stay flat)',
+            'time_in_trade': 'N/A',
+            'interpretation': consensus.get('interpretation', 'Setup invalid'),
+            'invalidation_action': 'Already invalidated - no position to manage'
+        }
+    
     direction = consensus['direction']
     confidence = consensus['confidence_level']
     weekly_dir = consensus.get('weekly_direction', 'NEUTRAL')
     daily_dir = consensus.get('daily_direction', 'NEUTRAL')
     
-    # Primary bias
     primary_bias = direction
     
-    # Action based on direction and confidence
     if direction == 'BULLISH' and confidence == 'HIGH':
         action = 'Buy dips toward support levels'
-        entry_method = 'Wait for pullback to Kijun or cloud top, then bullish TK cross'
+        entry_method = 'Wait for pullback to Kijun or Gann 50%, then bullish TK cross'
         size = 'Full size (high confidence)'
     elif direction == 'BULLISH' and confidence == 'MEDIUM':
         action = 'Buy dips cautiously'
@@ -1025,7 +1094,7 @@ def generate_strategy(consensus, invalidation, timeframes, current_price):
         size = '50% size (medium confidence)'
     elif direction == 'BEARISH' and confidence == 'HIGH':
         action = 'Sell rallies toward resistance levels'
-        entry_method = 'Wait for rally to Kijun or cloud bottom, then bearish TK cross'
+        entry_method = 'Wait for rally to Kijun or Gann 50%, then bearish TK cross'
         size = 'Full size (high confidence)'
     elif direction == 'BEARISH' and confidence == 'MEDIUM':
         action = 'Sell rallies cautiously'
@@ -1036,7 +1105,6 @@ def generate_strategy(consensus, invalidation, timeframes, current_price):
         entry_method = 'No entry until alignment improves'
         size = 'No position (low confidence)'
     
-    # Handle divergences
     if weekly_dir == 'BEARISH' and daily_dir == 'BULLISH':
         action = 'CAUTION: Daily bounce in weekly downtrend - sell rallies or stay flat'
         entry_method = 'If trading: wait for rally exhaustion near weekly resistance, then short'
@@ -1046,7 +1114,6 @@ def generate_strategy(consensus, invalidation, timeframes, current_price):
         entry_method = 'Wait for daily oversold + bullish reversal near weekly support'
         primary_bias = 'BULLISH'
     
-    # Invalidation action
     inv_price = invalidation.get('invalidation_price', 0)
     if direction == 'BULLISH':
         inv_action = f"Close long position if price closes below ${inv_price:,.0f}"
@@ -1066,7 +1133,7 @@ def generate_strategy(consensus, invalidation, timeframes, current_price):
     }
 
 # ============================================================
-# ANALYZE SINGLE TIMEFRAME
+# ANALYZE SINGLE TIMEFRAME - FIXED v5.0.3
 # ============================================================
 
 def analyze_timeframe(df, tf_name):
@@ -1074,33 +1141,31 @@ def analyze_timeframe(df, tf_name):
     if df is None or df.empty or len(df) < 50:
         return None
     
-    # Get parameters
     weight = TIMEFRAME_WEIGHTS.get(tf_name, 10)
     ichi_params = ICHIMOKU_PARAMS.get(tf_name, (9, 26, 52))
     
-    # Calculate indicators
     rsi = calculate_rsi(df)
     macd_line, macd_signal, macd_hist = calculate_macd(df)
     adx, adx_strength = calculate_adx(df)
     ichimoku = calculate_ichimoku(df, ichi_params)
-    gann = calculate_gann_levels_for_timeframe(df)
     
-    # Identify state
+    # FIXED: Pass tf_name to Gann calculation
+    gann = calculate_gann_levels_for_timeframe(df, tf_name)
+    
     state, state_info = identify_enneagram_state(df, rsi, macd_hist)
     arrow, arrow_meaning = determine_arrow(state, rsi, macd_hist)
     
-    # Classify direction
+    # FIXED: Pass tf_name to direction classification
     direction, bullish_count, bearish_count = classify_timeframe_direction(
-        rsi, adx, ichimoku['cloud_signal'], ichimoku['tk_cross'], macd_hist, ichimoku['kijun_flat']
+        rsi, adx, ichimoku['cloud_signal'], ichimoku['tk_cross'], macd_hist, ichimoku['kijun_flat'], tf_name
     )
     
     return {
         'direction': direction,
         'signal_type': 'BUY' if direction == 'BULLISH' else 'SELL' if direction == 'BEARISH' else 'WAIT',
         'weight': weight,
-        'weighted_contribution': 0,  # Will be set by consensus
+        'weighted_contribution': 0,
         
-        # Enneagram
         'enneagram_state': state,
         'state_name': state_info['name'],
         'state_bias': state_info['bias'],
@@ -1108,13 +1173,11 @@ def analyze_timeframe(df, tf_name):
         'arrow': arrow,
         'arrow_meaning': arrow_meaning,
         
-        # Indicators
         'rsi': safe_round(rsi),
         'macd_histogram': safe_round(macd_hist),
         'adx': safe_round(adx),
         'trend_strength': adx_strength,
         
-        # Ichimoku
         'cloud_signal': ichimoku['cloud_signal'],
         'tk_cross': ichimoku['tk_cross'],
         'kijun_flat': ichimoku['kijun_flat'],
@@ -1123,18 +1186,15 @@ def analyze_timeframe(df, tf_name):
         'cloud_top': safe_round(ichimoku['cloud_top']),
         'cloud_bottom': safe_round(ichimoku['cloud_bottom']),
         
-        # Gann
         'gann_high': safe_round(gann['high']),
         'gann_low': safe_round(gann['low']),
         'gann_50_pct': safe_round(gann['4_8']),
         'gann_38_pct': safe_round(gann['3_8']),
         'gann_62_pct': safe_round(gann['5_8']),
         
-        # Signal counts
         'bullish_signals': bullish_count,
         'bearish_signals': bearish_count,
         
-        # Full Gann levels
         'gann_levels': gann,
         'ichimoku': ichimoku
     }
@@ -1147,7 +1207,6 @@ def analyze_timeframe(df, tf_name):
 async def get_daily_signal():
     """Generate comprehensive multi-timeframe signal"""
     try:
-        # Fetch daily data
         df_daily = luxor.fetch_real_binance_data(use_cache=True)
         
         if df_daily is None or df_daily.empty:
@@ -1156,16 +1215,13 @@ async def get_daily_signal():
         if len(df_daily) < 100:
             raise HTTPException(status_code=500, detail=f"Insufficient data: {len(df_daily)} candles")
         
-        # Current price
         current_price = safe_float(df_daily['close'].iloc[-1])
         current_date = df_daily['date'].iloc[-1]
         
-        # Resample to higher timeframes
         df_3d = resample_ohlcv(df_daily, '3D')
         df_1w = resample_ohlcv(df_daily, '1W')
         df_1m = resample_ohlcv(df_daily, '1M')
         
-        # Analyze each timeframe
         timeframes = {}
         gann_levels_by_tf = {}
         ichimoku_by_tf = {}
@@ -1183,10 +1239,10 @@ async def get_daily_signal():
         # Calculate consensus
         consensus = calculate_consensus(timeframes)
         
-        # Calculate ATR from daily
+        # Calculate ATR
         atr = calculate_atr(df_daily)
         
-        # Calculate targets and stops
+        # Calculate targets
         targets = calculate_targets_and_stops(
             current_price, 
             consensus['direction'],
@@ -1195,23 +1251,28 @@ async def get_daily_signal():
             atr
         )
         
-        # Calculate R:R
+        # R:R
         rr_ratio, reward_pct, risk_pct = calculate_risk_reward(
             current_price,
             targets['tp1'],
             targets['stop_loss']
         )
         
-        # Time forecast
-        time_forecast = calculate_time_forecast(df_daily, current_price, atr)
+        # Time forecast - FIXED: pass weekly Gann levels
+        time_forecast = calculate_time_forecast(
+            df_daily, 
+            current_price, 
+            atr, 
+            gann_levels_by_tf.get('1W', {})
+        )
         
-        # Market regime
+        # Regime
         sma_200 = calculate_sma(df_daily, 200)
         daily_adx = timeframes['1D']['adx']
         daily_strength = timeframes['1D']['trend_strength']
         regime = detect_market_regime(current_price, sma_200, daily_adx, daily_strength)
         
-        # Invalidation rules
+        # Invalidation
         weekly_gann = gann_levels_by_tf.get('1W', {})
         weekly_ichi = ichimoku_by_tf.get('1W', {})
         weekly_rsi = timeframes.get('1W', {}).get('rsi', 50)
@@ -1223,21 +1284,23 @@ async def get_daily_signal():
             weekly_rsi
         )
         
+        # FIXED: Validate setup - check if invalidation already triggered
+        consensus = validate_setup(invalidation, consensus)
+        
         # Strategy
         strategy = generate_strategy(consensus, invalidation, timeframes, current_price)
         
-        # Get dominant timeframe state (weekly for primary)
+        # Weekly data for dominant state
         weekly_data = timeframes.get('1W', timeframes.get('1D', {}))
         
         # Build response
         response_data = {
-            # Meta
             'status': 'success',
-            'version': '5.0.2',
+            'version': '5.0.3',
             'timestamp': datetime.now().isoformat(),
             'symbol': 'BTCUSDT',
             
-            # Legacy fields (for DB compatibility)
+            # Legacy fields
             'signal_type': consensus['signal_type'],
             'signal_date': str(current_date),
             'entry_price': safe_round(current_price),
@@ -1255,11 +1318,12 @@ async def get_daily_signal():
             'ichimoku_signal': weekly_data.get('cloud_signal', 'NEUTRAL'),
             'rsi_value': safe_round(timeframes['1D']['rsi']),
             
-            # New MTF fields
+            # MTF fields
             'primary_direction': consensus['direction'],
             'weighted_score': consensus['weighted_score'],
             'mtf_alignment': consensus['alignment_count'],
             'market_regime': regime['regime'],
+            'setup_valid': consensus.get('is_valid', True),
             
             # Timeframes
             'timeframes': timeframes,
@@ -1267,7 +1331,7 @@ async def get_daily_signal():
             # Consensus
             'consensus': consensus,
             
-            # Price targets with R:R
+            # Price targets
             'price_targets': {
                 'source_timeframe': '1W',
                 'calculation_method': 'Gann + Ichimoku Confluence',
@@ -1284,7 +1348,6 @@ async def get_daily_signal():
                 'risk_pct': risk_pct
             },
             
-            # Legacy target fields
             'target_1': safe_round(targets['tp1']),
             'target_2': safe_round(targets['tp2']),
             'target_3': safe_round(targets['tp3']),
@@ -1292,7 +1355,6 @@ async def get_daily_signal():
             # Time forecast
             'time_forecast': time_forecast,
             
-            # Pivot forecast (legacy format)
             'pivot_forecast_primary': {
                 'date': time_forecast['next_pivot_date'],
                 'date_display': time_forecast['next_pivot_display'],
@@ -1302,7 +1364,7 @@ async def get_daily_signal():
                 'cycle_type': time_forecast['cycle_sources'][0] if time_forecast['cycle_sources'] else 'DEFAULT'
             },
             
-            # Square of 9 analysis
+            # SQ9
             'sq9_analysis': {
                 'from_current': calculate_square_of_9(current_price),
                 'from_high': calculate_square_of_9(gann_levels_by_tf.get('1D', {}).get('high', current_price)),
@@ -1315,14 +1377,13 @@ async def get_daily_signal():
                 }
             },
             
-            # Gann levels (legacy)
             'gann_sq9_levels': str(calculate_square_of_9(current_price)[:4]),
             'gann_angles_active': str([45, 90, 135, 180, 225, 270, 315, 360]),
             
-            # Major levels
+            # Major levels (from monthly for overall, weekly for trading)
             'major_high': safe_round(gann_levels_by_tf.get('1M', {}).get('high', 0)),
             'major_low': safe_round(gann_levels_by_tf.get('1M', {}).get('low', 0)),
-            'gann_range': safe_round(gann_levels_by_tf.get('1M', {}).get('range', 0)),
+            'gann_range': safe_round(gann_levels_by_tf.get('1W', {}).get('range', 0)),
             'gann_3_8': safe_round(gann_levels_by_tf.get('1W', {}).get('3_8', 0)),
             'gann_4_8': safe_round(gann_levels_by_tf.get('1W', {}).get('4_8', 0)),
             'gann_5_8': safe_round(gann_levels_by_tf.get('1W', {}).get('5_8', 0)),
@@ -1341,7 +1402,7 @@ async def get_daily_signal():
             'adx': safe_round(daily_adx),
             'trend_strength': daily_strength,
             
-            # State (weekly)
+            # State (weekly dominant)
             'state': weekly_data.get('enneagram_state', 1),
             'state_name': weekly_data.get('state_name', 'Unknown'),
             'phase': weekly_data.get('phase', 'Unknown'),
@@ -1360,7 +1421,7 @@ async def get_daily_signal():
             # Strategy
             'strategy': strategy,
             
-            # Analysis meta
+            # Meta
             'candles_analyzed': len(df_daily),
             'last_candle_date': str(current_date),
             'signal_strength': consensus['confidence_level'],
@@ -1383,20 +1444,17 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "version": "5.0.2",
+        "version": "5.0.3",
         "timestamp": datetime.now().isoformat()
     }
-
-# ============================================================
-# STARTUP
-# ============================================================
 
 @app.on_event("startup")
 async def startup_event():
     print("=" * 50)
-    print("LUXOR V7 PRANA RUNTIME - MTF EDITION v5.0.2")
+    print("LUXOR V7 PRANA RUNTIME - MTF EDITION v5.0.3")
     print("=" * 50)
     print(f"Timeframe Weights: {TIMEFRAME_WEIGHTS}")
+    print(f"Gann Lookback: {GANN_LOOKBACK}")
     print(f"API Host: {API_HOST}:{API_PORT}")
     print("=" * 50)
 
