@@ -1,5 +1,5 @@
 # ============================================================
-# LUXOR V7 PRANA - GANN EGYPT-INDIA UNIFIED SYSTEM v5.1.2
+# LUXOR V7 PRANA - GANN EGYPT-INDIA UNIFIED SYSTEM v5.1.3
 # CRITICAL FIXES: R:R Calculation, min_bars, Stop Loss Validation
 # ============================================================
 
@@ -54,7 +54,7 @@ def safe_round(value, decimals=2):
     return round(val, decimals)
 
 # ============================================================
-# v5.1.2 FIX: Improved level filtering with direction awareness
+# v5.1.3 FIX: Improved level filtering with direction awareness
 # ============================================================
 
 def filter_valid_levels(levels: List, current_price: float, direction: str) -> List:
@@ -71,9 +71,17 @@ def filter_valid_levels(levels: List, current_price: float, direction: str) -> L
     """
     valid = []
     for level in levels:
-        if level is None or level == 0 or np.isnan(level) if isinstance(level, float) else False:
+        # Skip invalid values BEFORE conversion
+        if level is None:
             continue
-        level = float(level)
+        try:
+            level = float(level)
+        except (ValueError, TypeError):
+            continue
+        
+        if level == 0 or np.isnan(level):
+            continue
+            
         if direction == "above" and level > current_price * 1.001:  # At least 0.1% above
             valid.append(level)
         elif direction == "below" and level < current_price * 0.999:  # At least 0.1% below
@@ -85,7 +93,7 @@ def filter_valid_levels(levels: List, current_price: float, direction: str) -> L
         return sorted(valid, reverse=True)  # Descending (nearest first)
 
 # ============================================================
-# CONFIGURATION - v5.1.2 REDUCED min_bars
+# CONFIGURATION - v5.1.3 REDUCED min_bars
 # ============================================================
 
 class Regime(Enum):
@@ -104,7 +112,7 @@ class TimeframeConfig:
     trend_weight: float
     range_weight: float
 
-# v5.1.2: REDUCED min_bars for better backtest compatibility
+# v5.1.3: REDUCED min_bars for better backtest compatibility
 # Previous v5.1.1 values were too strict (24/52/90/200)
 TIMEFRAME_CONFIGS = {
     "1M": TimeframeConfig(
@@ -159,7 +167,7 @@ GANN_CYCLES = [30, 45, 60, 90, 120, 144, 180, 270, 360]
 # ============================================================
 
 class LuxorV7PranaSystem:
-    """LUXOR V7 PRANA - v5.1.2 with Critical R:R Fixes"""
+    """LUXOR V7 PRANA - v5.1.3 with Critical R:R Fixes"""
     
     CACHE = {'df': None, 'last_fetch': None, 'cache_duration': 3600}
     VERSION = "5.1.2"
@@ -253,12 +261,15 @@ class LuxorV7PranaSystem:
         if 'volume' not in df.columns:
             df['volume'] = 0.0
         
+        # Preserve DatetimeIndex if present
+        has_datetime_index = isinstance(df.index, pd.DatetimeIndex)
+        
         if 'date' not in df.columns:
             if 'timestamp' in df.columns:
                 df['date'] = pd.to_datetime(df['timestamp'])
-            elif df.index.dtype == 'datetime64[ns]':
+            elif has_datetime_index:
                 df['date'] = df.index
-                df = df.reset_index(drop=True)
+                # DO NOT reset_index here - preserve DatetimeIndex
             else:
                 df['date'] = pd.date_range(end=datetime.now(), periods=len(df), freq='D')
         
@@ -268,15 +279,22 @@ class LuxorV7PranaSystem:
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
         
-        df = df.dropna(subset=['close']).reset_index(drop=True)
+        # Preserve DatetimeIndex when dropping NaN
+        df = df.dropna(subset=['close'])
+        if not has_datetime_index and not isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index(drop=True)
         
         return df
     
     def resample_ohlcv(self, df_1d: pd.DataFrame, target_tf: str) -> pd.DataFrame:
-        """Resample daily data to higher timeframe."""
+        """Resample daily data to higher timeframe - PRESERVE DatetimeIndex."""
         df = df_1d.copy()
-        idx = 'date' if 'date' in df.columns else 'timestamp'
-        df.set_index(idx, inplace=True)
+        
+        # If already has DatetimeIndex, use it directly
+        if not isinstance(df.index, pd.DatetimeIndex):
+            idx = 'date' if 'date' in df.columns else 'timestamp'
+            df[idx] = pd.to_datetime(df[idx])  # Ensure datetime type
+            df.set_index(idx, inplace=True)
         
         rule_map = {'3D': '3D', '1W': 'W', '1M': 'ME'}
         rule = rule_map.get(target_tf, '1D')
@@ -1212,7 +1230,7 @@ class LuxorV7PranaSystem:
         }
     
     # ========================================================
-    # v5.1.2 FIX: TRADE SETUP WITH CORRECT R:R
+    # v5.1.3 FIX: TRADE SETUP WITH CORRECT R:R
     # ========================================================
     
     def generate_trade_setups(self, price: float, bias: Dict, regime: Dict,
@@ -1220,7 +1238,7 @@ class LuxorV7PranaSystem:
         """
         Generate trade setups with FIXED R:R calculation.
         
-        v5.1.2 FIXES:
+        v5.1.3 FIXES:
         - Stop loss validation (LONG: stop < entry, SHORT: stop > entry)
         - ATR-based fallback for invalid stops
         - Guaranteed minimum R:R of 1.5
@@ -1284,7 +1302,7 @@ class LuxorV7PranaSystem:
             if support_levels:
                 stop_loss = support_levels[0]
             else:
-                stop_loss = price - (1.5 * atr)
+                stop_loss = price - (2.5 * atr)  # v5.1.3: Increased from 1.5x to reduce premature exits
             
             # VALIDATION: Stop MUST be below entry
             if stop_loss >= entry:
@@ -1358,7 +1376,7 @@ class LuxorV7PranaSystem:
             if resistance_levels:
                 stop_loss = resistance_levels[0]
             else:
-                stop_loss = price + (1.5 * atr)
+                stop_loss = price + (2.5 * atr)  # v5.1.3: Increased from 1.5x to reduce premature exits
             
             # VALIDATION: Stop MUST be above entry
             if stop_loss <= entry:
@@ -1508,7 +1526,7 @@ class LuxorV7PranaSystem:
             # Time forecast
             time_forecast = self.calculate_time_forecast(df_1d, d_gann, reference_date)
             
-            # Trade setups (v5.1.2 FIXED)
+            # Trade setups (v5.1.3 FIXED)
             trade_setups = self.generate_trade_setups(price, bias, regime, d_gann, tf_1d_analysis, d_atr)
             
             # Price levels
