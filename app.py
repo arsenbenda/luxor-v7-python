@@ -1,6 +1,6 @@
 # ============================================================
-# LUXOR V7 PRANA RUNTIME - FastAPI v5.0.6
-# With detailed error logging
+# LUXOR V7 PRANA RUNTIME - FastAPI v5.0.7
+# Fixed: All N/A fields, complete Telegram mapping
 # ============================================================
 
 from fastapi import FastAPI, HTTPException
@@ -26,10 +26,12 @@ logger = logging.getLogger(__name__)
 # FASTAPI APP
 # ============================================================
 
+VERSION = "5.0.7"
+
 app = FastAPI(
     title="LUXOR V7 PRANA",
     description="Multi-Timeframe Trading Signal System",
-    version="5.0.6"
+    version=VERSION
 )
 
 app.add_middleware(
@@ -51,7 +53,7 @@ try:
     logger.info("Importing LuxorV7PranaSystem...")
     from luxor_v7_prana import LuxorV7PranaSystem
     luxor_system = LuxorV7PranaSystem()
-    logger.info("LuxorV7PranaSystem initialized successfully")
+    logger.info(f"LuxorV7PranaSystem v{VERSION} initialized successfully")
 except Exception as e:
     import_error = str(e)
     logger.error(f"Failed to import LuxorV7PranaSystem: {e}")
@@ -65,7 +67,7 @@ except Exception as e:
 async def root():
     return {
         "message": "LUXOR V7 PRANA - MTF Signal System",
-        "version": "5.0.6",
+        "version": VERSION,
         "system_loaded": luxor_system is not None,
         "import_error": import_error
     }
@@ -75,7 +77,7 @@ async def root():
 async def health():
     return {
         "status": "healthy" if luxor_system else "degraded",
-        "version": "5.0.6",
+        "version": VERSION,
         "timestamp": datetime.now().isoformat(),
         "system_loaded": luxor_system is not None,
         "import_error": import_error
@@ -89,6 +91,7 @@ async def debug():
         "system_loaded": luxor_system is not None,
         "import_error": import_error,
         "python_version": sys.version,
+        "version": VERSION
     }
     
     imports = {}
@@ -121,7 +124,10 @@ async def get_daily_signal(symbol: str = "BTCUSDT"):
             logger.error(f"[SIGNAL] Error: {error_detail}")
             raise HTTPException(status_code=500, detail=error_detail)
         
-        logger.info(f"[SIGNAL] Success: {signal.get('consensus', {}).get('primary_direction', 'N/A')}")
+        direction = signal.get('consensus', {}).get('primary_direction', 'N/A')
+        confidence = signal.get('consensus', {}).get('confidence_level', 'N/A')
+        logger.info(f"[SIGNAL] Success: {direction} ({confidence})")
+        
         return signal
     
     except HTTPException:
@@ -136,7 +142,7 @@ async def get_daily_signal(symbol: str = "BTCUSDT"):
 
 @app.get("/signal/quick")
 async def get_quick_signal(symbol: str = "BTCUSDT"):
-    """Quick signal endpoint."""
+    """Quick signal endpoint - simplified response."""
     logger.info(f"[QUICK] Request for {symbol}")
     
     if luxor_system is None:
@@ -170,7 +176,7 @@ async def get_quick_signal(symbol: str = "BTCUSDT"):
             "rsi": round(rsi, 2),
             "sma_200": round(sma_200, 2),
             "candles": len(df),
-            "version": "5.0.6"
+            "version": VERSION
         }
     
     except HTTPException:
