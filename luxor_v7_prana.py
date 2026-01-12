@@ -1,7 +1,6 @@
 # ============================================================
 # LUXOR V7 PRANA - GANN EGYPT-INDIA UNIFIED SYSTEM v5.0.6
-# Enhanced with Multi-Timeframe Analysis
-# Fixed: ME -> M for pandas compatibility
+# Fixed: numpy types serialization for JSON
 # ============================================================
 
 import pandas as pd
@@ -17,6 +16,29 @@ import ccxt
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# HELPER: Convert numpy types to native Python
+# ============================================================
+
+def convert_numpy_types(obj):
+    """Convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
 
 # ============================================================
 # ENUMS & CONFIGURATION
@@ -54,7 +76,6 @@ TIMEFRAME_CONFIGS = {
     "1D": TimeframeConfig("1D", 0.15, 252, 126),
 }
 
-# Thresholds
 RSI_OVERSOLD = 30
 RSI_EXTREME_OVERSOLD = 25
 RSI_OVERBOUGHT = 70
@@ -137,7 +158,7 @@ class LuxorV7PranaSystem:
         logger.info("[INIT] LuxorV7PranaSystem v5.0.6 initialized")
     
     # ========================================================
-    # DATA FETCHING (Multi-Exchange via CCXT)
+    # DATA FETCHING
     # ========================================================
     
     def fetch_ohlcv_ccxt(self, symbol: str = "BTC/USDT", interval: str = "1d", limit: int = 500) -> pd.DataFrame:
@@ -152,7 +173,6 @@ class LuxorV7PranaSystem:
             ('gate', 'BTC/USDT'),
         ]
         
-        # Adjust symbol for non-BTC
         if 'ETH' in symbol:
             exchanges_to_try = [
                 ('kucoin', 'ETH/USDT'),
@@ -169,7 +189,6 @@ class LuxorV7PranaSystem:
                 exchange_class = getattr(ccxt, exchange_id, None)
                 
                 if exchange_class is None:
-                    logger.warning(f"{exchange_id} not available in ccxt")
                     continue
                 
                 exchange = exchange_class({
@@ -197,7 +216,7 @@ class LuxorV7PranaSystem:
         raise Exception(f"All exchanges failed. Last error: {last_error}")
     
     def fetch_real_binance_data(self, use_cache=True, symbol: str = "BTCUSDT"):
-        """Fetch data with caching - uses CCXT."""
+        """Fetch data with caching."""
         try:
             if use_cache and self.CACHE['df'] is not None:
                 cache_age = (datetime.now() - self.CACHE['last_fetch']).total_seconds()
@@ -205,7 +224,6 @@ class LuxorV7PranaSystem:
                     logger.info(f"[CACHE] Using cached data (age: {cache_age:.0f}s)")
                     return self.CACHE['df'].copy()
             
-            # Convert symbol format
             if '/' not in symbol:
                 ccxt_symbol = symbol[:-4] + '/USDT' if symbol.endswith('USDT') else symbol
             else:
@@ -226,13 +244,11 @@ class LuxorV7PranaSystem:
         """Resample daily to higher timeframes."""
         df = df_1d.copy()
         
-        # Set index
         if 'date' in df.columns:
             df.set_index('date', inplace=True)
         elif 'timestamp' in df.columns:
             df.set_index('timestamp', inplace=True)
         
-        # FIXED: Use 'M' instead of 'ME' for pandas compatibility
         resample_map = {'3D': '3D', '1W': 'W', '1M': 'M'}
         rule = resample_map.get(target_tf, '1D')
         
@@ -246,7 +262,6 @@ class LuxorV7PranaSystem:
         
         resampled.reset_index(inplace=True)
         
-        # Rename index column to timestamp
         if 'index' in resampled.columns:
             resampled.rename(columns={'index': 'timestamp'}, inplace=True)
         elif 'date' in resampled.columns:
@@ -255,11 +270,10 @@ class LuxorV7PranaSystem:
         return resampled
     
     # ========================================================
-    # INDICATOR CALCULATIONS
+    # INDICATORS
     # ========================================================
     
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI."""
         delta = prices.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -270,59 +284,36 @@ class LuxorV7PranaSystem:
         return rsi.fillna(50)
     
     def calculate_macd(self, prices: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        """Calculate MACD."""
         ema12 = prices.ewm(span=12, adjust=False).mean()
         ema26 = prices.ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
         signal = macd.ewm(span=9, adjust=False).mean()
-        histogram = macd - signal
-        return macd, signal, histogram
+        return macd, signal, macd - signal
     
     def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate ADX."""
         high, low, close = df['high'], df['low'], df['close']
-        
         plus_dm = high.diff()
         minus_dm = low.diff().abs() * -1
-        
         plus_dm = plus_dm.where((plus_dm > minus_dm.abs()) & (plus_dm > 0), 0)
         minus_dm = minus_dm.abs().where((minus_dm.abs() > plus_dm) & (minus_dm < 0), 0)
-        
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs()
-        ], axis=1).max(axis=1)
-        
+        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1/period, min_periods=period).mean()
         plus_di = 100 * (plus_dm.ewm(alpha=1/period).mean() / atr.replace(0, 1))
         minus_di = 100 * (minus_dm.ewm(alpha=1/period).mean() / atr.replace(0, 1))
-        
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1)
-        adx = dx.ewm(alpha=1/period, min_periods=period).mean()
-        
-        return adx.fillna(0)
+        return dx.ewm(alpha=1/period, min_periods=period).mean().fillna(0)
     
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate ATR."""
         high, low, close = df['high'], df['low'], df['close']
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs()
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean()
-        return atr.fillna(tr.mean())
+        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+        return tr.rolling(window=period).mean().fillna(tr.mean())
     
     def calculate_ichimoku(self, df: pd.DataFrame) -> Dict:
-        """Calculate Ichimoku."""
         high, low, close = df['high'], df['low'], df['close']
-        
         tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
         kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
         senkou_a = ((tenkan + kijun) / 2).shift(26)
         senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
-        
         return {
             'tenkan': tenkan.fillna(close),
             'kijun': kijun.fillna(close),
@@ -331,12 +322,11 @@ class LuxorV7PranaSystem:
         }
     
     def calculate_gann_levels(self, df: pd.DataFrame, tf_config: TimeframeConfig) -> GannLevels:
-        """Calculate Gann levels."""
         lookback = min(tf_config.gann_lookback, len(df))
         recent_df = df.tail(lookback)
         
-        high = recent_df['high'].max()
-        low = recent_df['low'].min()
+        high = float(recent_df['high'].max())
+        low = float(recent_df['low'].min())
         high_idx = recent_df['high'].idxmax()
         low_idx = recent_df['low'].idxmin()
         
@@ -345,87 +335,76 @@ class LuxorV7PranaSystem:
         low_date = str(df.loc[low_idx, ts_col]) if ts_col in df.columns else str(low_idx)
         
         range_value = high - low
-        current_price = df['close'].iloc[-1]
+        current_price = float(df['close'].iloc[-1])
         range_pct = (range_value / current_price) * 100 if current_price > 0 else 0
         
-        levels = {f"{i}_8": low + (range_value * i / 8) for i in range(9)}
+        levels = {f"{i}_8": float(low + (range_value * i / 8)) for i in range(9)}
         
         return GannLevels(
-            high=float(high),
-            low=float(low),
-            high_date=high_date,
-            low_date=low_date,
-            range_value=float(range_value),
-            range_pct=float(range_pct),
-            lookback_bars=lookback,
-            levels=levels
+            high=high, low=low, high_date=high_date, low_date=low_date,
+            range_value=float(range_value), range_pct=float(range_pct),
+            lookback_bars=int(lookback), levels=levels
         )
     
     # ========================================================
-    # DIVERGENCE & CAPITULATION DETECTION
+    # DIVERGENCE & CAPITULATION
     # ========================================================
     
     def detect_divergence(self, df: pd.DataFrame, rsi: pd.Series, lookback: int = 14) -> Dict:
-        """Detect divergence."""
         if len(df) < lookback * 2:
             return {"bullish_divergence": False, "bearish_divergence": False}
         
         recent_prices = df['close'].tail(lookback * 2)
         recent_rsi = rsi.tail(lookback * 2)
         
-        price_min_1 = recent_prices.iloc[:lookback].min()
-        price_min_2 = recent_prices.iloc[lookback:].min()
-        rsi_min_1 = recent_rsi.iloc[:lookback].min()
-        rsi_min_2 = recent_rsi.iloc[lookback:].min()
+        price_min_1 = float(recent_prices.iloc[:lookback].min())
+        price_min_2 = float(recent_prices.iloc[lookback:].min())
+        rsi_min_1 = float(recent_rsi.iloc[:lookback].min())
+        rsi_min_2 = float(recent_rsi.iloc[lookback:].min())
         
-        bullish_div = (price_min_2 < price_min_1) and (rsi_min_2 > rsi_min_1)
+        bullish_div = bool((price_min_2 < price_min_1) and (rsi_min_2 > rsi_min_1))
         
-        price_max_1 = recent_prices.iloc[:lookback].max()
-        price_max_2 = recent_prices.iloc[lookback:].max()
-        rsi_max_1 = recent_rsi.iloc[:lookback].max()
-        rsi_max_2 = recent_rsi.iloc[lookback:].max()
+        price_max_1 = float(recent_prices.iloc[:lookback].max())
+        price_max_2 = float(recent_prices.iloc[lookback:].max())
+        rsi_max_1 = float(recent_rsi.iloc[:lookback].max())
+        rsi_max_2 = float(recent_rsi.iloc[lookback:].max())
         
-        bearish_div = (price_max_2 > price_max_1) and (rsi_max_2 < rsi_max_1)
+        bearish_div = bool((price_max_2 > price_max_1) and (rsi_max_2 < rsi_max_1))
         
         return {"bullish_divergence": bullish_div, "bearish_divergence": bearish_div}
     
     def detect_capitulation(self, df_weekly: pd.DataFrame, df_daily: pd.DataFrame,
                            weekly_rsi: float, weekly_gann: GannLevels, current_price: float) -> CapitulationAnalysis:
-        """Detect capitulation."""
         criteria_met, criteria_missing = [], []
         
-        # RSI extreme
-        rsi_extreme = weekly_rsi < CAPITULATION_RSI_THRESHOLD
+        rsi_extreme = bool(weekly_rsi < CAPITULATION_RSI_THRESHOLD)
         if rsi_extreme:
             criteria_met.append(f"RSI_EXTREME: {weekly_rsi:.1f}")
         else:
             criteria_missing.append(f"RSI not extreme: {weekly_rsi:.1f}")
         
-        # Volume spike
         volume_ratio = 1.0
         if len(df_daily) >= 20 and 'volume' in df_daily.columns:
-            avg_vol = df_daily['volume'].tail(20).mean()
+            avg_vol = float(df_daily['volume'].tail(20).mean())
             if avg_vol > 0:
-                volume_ratio = df_daily['volume'].iloc[-1] / avg_vol
+                volume_ratio = float(df_daily['volume'].iloc[-1] / avg_vol)
         
-        volume_spike = volume_ratio >= VOLUME_SPIKE_THRESHOLD
+        volume_spike = bool(volume_ratio >= VOLUME_SPIKE_THRESHOLD)
         if volume_spike:
             criteria_met.append(f"VOLUME_SPIKE: {volume_ratio:.1f}x")
         else:
             criteria_missing.append(f"No volume spike: {volume_ratio:.1f}x")
         
-        # Gann support
-        gann_3_8 = weekly_gann.levels.get("3_8", weekly_gann.low)
-        gann_support_test = abs(current_price - gann_3_8) / current_price < 0.05
+        gann_3_8 = float(weekly_gann.levels.get("3_8", weekly_gann.low))
+        gann_support_test = bool(abs(current_price - gann_3_8) / current_price < 0.05)
         if gann_support_test:
             criteria_met.append("GANN_SUPPORT")
         else:
             criteria_missing.append("Not near Gann support")
         
-        # Divergence
         weekly_rsi_series = self.calculate_rsi(df_weekly['close'])
         divergence = self.detect_divergence(df_weekly, weekly_rsi_series, 8)
-        bullish_divergence = divergence.get("bullish_divergence", False)
+        bullish_divergence = bool(divergence.get("bullish_divergence", False))
         if bullish_divergence:
             criteria_met.append("BULLISH_DIVERGENCE")
         else:
@@ -442,31 +421,30 @@ class LuxorV7PranaSystem:
             status, confidence = "NONE", 0.20
         
         return CapitulationAnalysis(
-            is_capitulation=num_criteria >= 3,
+            is_capitulation=bool(num_criteria >= 3),
             status=status,
-            confidence=confidence,
+            confidence=float(confidence),
             criteria_met=criteria_met,
             criteria_missing=criteria_missing,
             rsi_extreme=rsi_extreme,
             volume_spike=volume_spike,
             gann_support_test=gann_support_test,
             bullish_divergence=bullish_divergence,
-            weekly_rsi=weekly_rsi,
-            volume_ratio=volume_ratio
+            weekly_rsi=float(weekly_rsi),
+            volume_ratio=float(volume_ratio)
         )
     
     # ========================================================
-    # REGIME DETECTION WITH OVERRIDE
+    # REGIME
     # ========================================================
     
     def determine_regime(self, df_daily: pd.DataFrame, weekly_rsi: float, weekly_adx: float,
                         capitulation: CapitulationAnalysis, current_price: float) -> RegimeAnalysis:
-        """Determine regime with override."""
         warnings_list = []
         override_active = False
         override_reason = None
         
-        sma_200 = df_daily['close'].rolling(200).mean().iloc[-1] if len(df_daily) >= 200 else current_price
+        sma_200 = float(df_daily['close'].rolling(200).mean().iloc[-1]) if len(df_daily) >= 200 else current_price
         price_vs_sma = "above" if current_price > sma_200 else "below"
         trend_strength = "strong" if weekly_adx > ADX_STRONG_TREND else "weak"
         
@@ -477,7 +455,6 @@ class LuxorV7PranaSystem:
         else:
             base_regime = Regime.RANGING
         
-        # CAPITULATION OVERRIDE
         if capitulation.is_capitulation:
             override_active = True
             override_reason = f"Capitulation {capitulation.status}"
@@ -486,8 +463,6 @@ class LuxorV7PranaSystem:
             allows_long = True
             position_size_cap = 0.25 if capitulation.status == "POTENTIAL" else 0.50
             warnings_list.append("CAPITULATION OVERRIDE: Shorts blocked")
-        
-        # EUPHORIA OVERRIDE
         elif weekly_rsi > EUPHORIA_RSI_THRESHOLD:
             override_active = True
             override_reason = f"Euphoria: RSI {weekly_rsi:.1f}"
@@ -496,26 +471,22 @@ class LuxorV7PranaSystem:
             allows_long = False
             position_size_cap = 0.25
             warnings_list.append("EUPHORIA OVERRIDE: Longs blocked")
-        
         else:
             final_regime = base_regime
             allows_short = True
             allows_long = True
             position_size_cap = 1.0
         
-        if final_regime in [Regime.TRENDING_BULL, Regime.TRENDING_BEAR]:
-            regime_strength = min(weekly_adx / 100, 1.0)
-        else:
-            regime_strength = 0.5
+        regime_strength = float(min(weekly_adx / 100, 1.0)) if final_regime in [Regime.TRENDING_BULL, Regime.TRENDING_BEAR] else 0.5
         
         return RegimeAnalysis(
             regime=final_regime,
             regime_strength=regime_strength,
-            override_active=override_active,
+            override_active=bool(override_active),
             override_reason=override_reason,
-            allows_short=allows_short,
-            allows_long=allows_long,
-            position_size_cap=position_size_cap,
+            allows_short=bool(allows_short),
+            allows_long=bool(allows_long),
+            position_size_cap=float(position_size_cap),
             warnings=warnings_list
         )
     
@@ -524,55 +495,38 @@ class LuxorV7PranaSystem:
     # ========================================================
     
     def analyze_timeframe(self, df: pd.DataFrame, tf_name: str) -> Dict:
-        """Analyze a single timeframe."""
         tf_config = TIMEFRAME_CONFIGS[tf_name]
         
         if len(df) < tf_config.min_bars:
-            logger.warning(f"Insufficient data for {tf_name}: {len(df)} < {tf_config.min_bars}")
-            # Return default values instead of raising
             return {
-                "direction": "NEUTRAL",
-                "state_name": "Insufficient Data",
-                "rsi": 50.0,
-                "adx": 0.0,
-                "atr": 0.0,
-                "bullish_signals": 0,
-                "bearish_signals": 0,
-                "signal_details": {},
+                "direction": "NEUTRAL", "state_name": "Insufficient Data",
+                "rsi": 50.0, "adx": 0.0, "atr": 0.0,
+                "bullish_signals": 0, "bearish_signals": 0, "signal_details": {},
                 "volume_ratio": 1.0,
-                "ichimoku": {"tk_cross": "NEUTRAL", "price_vs_cloud": "INSIDE", "kijun": 0, "cloud_top": 0, "cloud_bottom": 0},
-                "gann": {"high": 0, "low": 0, "levels": {}}
+                "ichimoku": {"tk_cross": "NEUTRAL", "price_vs_cloud": "INSIDE", "kijun": 0.0, "cloud_top": 0.0, "cloud_bottom": 0.0},
+                "gann": {"high": 0.0, "low": 0.0, "levels": {}}
             }
         
         current_price = float(df['close'].iloc[-1])
         
-        # RSI
         rsi_series = self.calculate_rsi(df['close'])
         rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
         
-        # MACD
         macd, signal, hist = self.calculate_macd(df['close'])
         macd_hist = float(hist.iloc[-1]) if not pd.isna(hist.iloc[-1]) else 0.0
         
-        # ADX
         adx_series = self.calculate_adx(df)
         adx = float(adx_series.iloc[-1]) if not pd.isna(adx_series.iloc[-1]) else 0.0
         
-        # ATR
         atr_series = self.calculate_atr(df)
         atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
         
-        # Ichimoku
         ichimoku = self.calculate_ichimoku(df)
-        
-        # Gann
         gann = self.calculate_gann_levels(df, tf_config)
         
-        # Signal counting
         bullish, bearish = 0, 0
         signal_details = {}
         
-        # RSI signals
         if rsi < RSI_OVERSOLD:
             bullish += 1
             signal_details["RSI"] = f"OVERSOLD ({rsi:.1f})"
@@ -582,7 +536,6 @@ class LuxorV7PranaSystem:
         else:
             signal_details["RSI"] = f"NEUTRAL ({rsi:.1f})"
         
-        # MACD signals
         if macd_hist > 0:
             bullish += 1
             signal_details["MACD"] = "BULLISH"
@@ -590,7 +543,6 @@ class LuxorV7PranaSystem:
             bearish += 1
             signal_details["MACD"] = "BEARISH"
         
-        # Ichimoku TK cross
         tenkan_val = float(ichimoku['tenkan'].iloc[-1])
         kijun_val = float(ichimoku['kijun'].iloc[-1])
         if tenkan_val > kijun_val:
@@ -600,11 +552,10 @@ class LuxorV7PranaSystem:
             bearish += 1
             signal_details["TK_CROSS"] = "BEARISH"
         
-        # Cloud position
         senkou_a = float(ichimoku['senkou_a'].iloc[-1])
         senkou_b = float(ichimoku['senkou_b'].iloc[-1])
-        cloud_top = max(senkou_a, senkou_b)
-        cloud_bottom = min(senkou_a, senkou_b)
+        cloud_top = float(max(senkou_a, senkou_b))
+        cloud_bottom = float(min(senkou_a, senkou_b))
         
         if current_price > cloud_top:
             bullish += 1
@@ -615,8 +566,7 @@ class LuxorV7PranaSystem:
         else:
             signal_details["CLOUD"] = "INSIDE"
         
-        # Gann 50%
-        gann_50 = gann.levels.get("4_8", current_price)
+        gann_50 = float(gann.levels.get("4_8", current_price))
         if current_price > gann_50:
             bullish += 1
             signal_details["GANN_50"] = f"ABOVE (${gann_50:,.0f})"
@@ -624,7 +574,6 @@ class LuxorV7PranaSystem:
             bearish += 1
             signal_details["GANN_50"] = f"BELOW (${gann_50:,.0f})"
         
-        # Direction
         if tf_name == "1M":
             if bullish > bearish + 1:
                 direction = "BULLISH"
@@ -640,7 +589,6 @@ class LuxorV7PranaSystem:
             else:
                 direction = "NEUTRAL"
         
-        # State name
         if rsi < 25:
             state_name = "Capitulation"
         elif rsi < 35:
@@ -656,12 +604,11 @@ class LuxorV7PranaSystem:
         else:
             state_name = "Transition"
         
-        # Volume
         volume_ratio = 1.0
         if 'volume' in df.columns and len(df) >= 20:
-            avg_vol = df['volume'].tail(20).mean()
+            avg_vol = float(df['volume'].tail(20).mean())
             if avg_vol > 0:
-                volume_ratio = df['volume'].iloc[-1] / avg_vol
+                volume_ratio = float(df['volume'].iloc[-1] / avg_vol)
         
         return {
             "direction": direction,
@@ -669,8 +616,8 @@ class LuxorV7PranaSystem:
             "rsi": round(rsi, 2),
             "adx": round(adx, 2),
             "atr": round(atr, 2),
-            "bullish_signals": bullish,
-            "bearish_signals": bearish,
+            "bullish_signals": int(bullish),
+            "bearish_signals": int(bearish),
             "signal_details": signal_details,
             "volume_ratio": round(volume_ratio, 2),
             "ichimoku": {
@@ -688,12 +635,11 @@ class LuxorV7PranaSystem:
         }
     
     # ========================================================
-    # MTF CONSENSUS
+    # CONSENSUS
     # ========================================================
     
     def calculate_mtf_consensus(self, timeframes: Dict, regime: RegimeAnalysis) -> Dict:
-        """Calculate weighted consensus."""
-        weighted_bullish, weighted_bearish = 0, 0
+        weighted_bullish, weighted_bearish = 0.0, 0.0
         alignment_count = 0
         conflicts = []
         
@@ -732,9 +678,9 @@ class LuxorV7PranaSystem:
         
         return {
             "primary_direction": primary_direction,
-            "weighted_score": weighted_score,
+            "weighted_score": int(weighted_score),
             "alignment": f"{alignment_count}/4",
-            "alignment_count": alignment_count,
+            "alignment_count": int(alignment_count),
             "confidence_level": confidence_level,
             "conflicts": conflicts
         }
@@ -746,13 +692,12 @@ class LuxorV7PranaSystem:
     def generate_trade_setups(self, current_price: float, timeframes: Dict, consensus: Dict,
                              regime: RegimeAnalysis, capitulation: CapitulationAnalysis,
                              weekly_gann: GannLevels) -> List[Dict]:
-        """Generate trade setups."""
         setups = []
         
-        daily_atr = timeframes["1D"]["atr"]
-        gann_3_8 = weekly_gann.levels.get("3_8", current_price * 0.95)
-        gann_5_8 = weekly_gann.levels.get("5_8", current_price * 1.05)
-        gann_2_8 = weekly_gann.levels.get("2_8", current_price * 0.90)
+        daily_atr = float(timeframes["1D"]["atr"])
+        gann_3_8 = float(weekly_gann.levels.get("3_8", current_price * 0.95))
+        gann_5_8 = float(weekly_gann.levels.get("5_8", current_price * 1.05))
+        gann_2_8 = float(weekly_gann.levels.get("2_8", current_price * 0.90))
         
         primary_direction = consensus["primary_direction"]
         
@@ -768,7 +713,7 @@ class LuxorV7PranaSystem:
             setups.append({
                 "id": 1, "type": "PRIMARY", "direction": "LONG", "confidence": confidence,
                 "entry": round(entry, 2), "stop_loss": round(stop, 2), "tp1": round(tp1, 2),
-                "rr_ratio": round(rr, 2), "position_size": min(size, regime.position_size_cap)
+                "rr_ratio": round(rr, 2), "position_size": round(min(size, regime.position_size_cap), 2)
             })
         
         elif primary_direction == "BEARISH" and regime.allows_short:
@@ -783,7 +728,7 @@ class LuxorV7PranaSystem:
             setups.append({
                 "id": 1, "type": "PRIMARY", "direction": "SHORT", "confidence": confidence,
                 "entry": round(entry, 2), "stop_loss": round(stop, 2), "tp1": round(tp1, 2),
-                "rr_ratio": round(rr, 2), "position_size": min(size, regime.position_size_cap)
+                "rr_ratio": round(rr, 2), "position_size": round(min(size, regime.position_size_cap), 2)
             })
         
         if capitulation.is_capitulation and regime.allows_long:
@@ -816,12 +761,11 @@ class LuxorV7PranaSystem:
     
     def calculate_time_forecast(self, df_daily: pd.DataFrame, current_price: float,
                                 atr: float, weekly_gann: GannLevels) -> Dict:
-        """Calculate time forecast."""
         lookback = min(365, len(df_daily))
         recent_df = df_daily.tail(lookback)
         
-        major_high = recent_df['high'].max()
-        major_low = recent_df['low'].min()
+        major_high = float(recent_df['high'].max())
+        major_low = float(recent_df['low'].min())
         major_high_idx = recent_df['high'].idxmax()
         major_low_idx = recent_df['low'].idxmin()
         
@@ -837,12 +781,11 @@ class LuxorV7PranaSystem:
             
             if ref_date.tzinfo is not None:
                 ref_date = ref_date.replace(tzinfo=None)
-            days_since = (datetime.now() - ref_date).days
+            days_since = int((datetime.now() - ref_date).days)
         except:
             reference_type, expected_pivot = "HIGH", "LOW"
             days_since = 90
         
-        # Find next cycle
         next_pivot_date = None
         days_to_cycle = 90
         confidence = 0.40
@@ -851,16 +794,16 @@ class LuxorV7PranaSystem:
             calc_days = cycle - (days_since % cycle)
             if calc_days > 0:
                 next_pivot_date = (datetime.now() + timedelta(days=calc_days)).strftime("%Y-%m-%d")
-                days_to_cycle = calc_days
+                days_to_cycle = int(calc_days)
                 confidence = 0.45 + (0.15 if cycle in [180, 360] else 0)
                 break
         
         if next_pivot_date is None:
             next_pivot_date = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d")
         
-        gann_3_8 = weekly_gann.levels.get("3_8", current_price * 0.9)
-        gann_5_8 = weekly_gann.levels.get("5_8", current_price * 1.1)
-        atr_proj = atr * np.sqrt(days_to_cycle)
+        gann_3_8 = float(weekly_gann.levels.get("3_8", current_price * 0.9))
+        gann_5_8 = float(weekly_gann.levels.get("5_8", current_price * 1.1))
+        atr_proj = float(atr * np.sqrt(days_to_cycle))
         
         return {
             "next_pivot_date": next_pivot_date,
@@ -882,12 +825,10 @@ class LuxorV7PranaSystem:
         try:
             logger.info(f"[MTF] Generating signal for {symbol}")
             
-            # Fetch daily data
             df_1d = self.fetch_real_binance_data(use_cache=True, symbol=symbol)
             if df_1d is None or len(df_1d) < 100:
                 raise ValueError(f"Insufficient data: {len(df_1d) if df_1d is not None else 0} candles")
             
-            # Resample to higher timeframes
             df_3d = self.resample_ohlcv(df_1d, "3D")
             df_1w = self.resample_ohlcv(df_1d, "1W")
             df_1m = self.resample_ohlcv(df_1d, "1M")
@@ -896,7 +837,6 @@ class LuxorV7PranaSystem:
             ts_col = 'date' if 'date' in df_1d.columns else 'timestamp'
             signal_date = str(df_1d[ts_col].iloc[-1])
             
-            # Analyze each timeframe
             timeframes = {
                 "1D": self.analyze_timeframe(df_1d, "1D"),
                 "3D": self.analyze_timeframe(df_3d, "3D"),
@@ -904,35 +844,28 @@ class LuxorV7PranaSystem:
                 "1M": self.analyze_timeframe(df_1m, "1M"),
             }
             
-            # Weekly data for regime/capitulation
-            weekly_rsi = timeframes["1W"]["rsi"]
-            weekly_adx = timeframes["1W"]["adx"]
+            weekly_rsi = float(timeframes["1W"]["rsi"])
+            weekly_adx = float(timeframes["1W"]["adx"])
             weekly_gann = self.calculate_gann_levels(df_1w, TIMEFRAME_CONFIGS["1W"])
             
-            # Capitulation detection
             capitulation = self.detect_capitulation(df_1w, df_1d, weekly_rsi, weekly_gann, current_price)
-            
-            # Regime with override
             regime = self.determine_regime(df_1d, weekly_rsi, weekly_adx, capitulation, current_price)
-            
-            # Consensus
             consensus = self.calculate_mtf_consensus(timeframes, regime)
             
-            # Time forecast
-            daily_atr = timeframes["1D"]["atr"]
+            daily_atr = float(timeframes["1D"]["atr"])
             time_forecast = self.calculate_time_forecast(df_1d, current_price, daily_atr, weekly_gann)
             
-            # Trade setups
             trade_setups = self.generate_trade_setups(
                 current_price, timeframes, consensus, regime, capitulation, weekly_gann
             )
             
             logger.info(f"[MTF] Signal generated: {consensus['primary_direction']} ({consensus['confidence_level']})")
             
-            return {
+            # Build result with native Python types
+            result = {
                 "status": "success",
                 "symbol": symbol,
-                "current_price": current_price,
+                "current_price": round(current_price, 2),
                 "signal_date": signal_date,
                 "timestamp": datetime.now().isoformat(),
                 "version": "5.0.6",
@@ -942,28 +875,28 @@ class LuxorV7PranaSystem:
                 
                 "regime": {
                     "current": regime.regime.value,
-                    "strength": regime.regime_strength,
-                    "override_active": regime.override_active,
+                    "strength": round(regime.regime_strength, 2),
+                    "override_active": bool(regime.override_active),
                     "override_reason": regime.override_reason,
-                    "allows_short": regime.allows_short,
-                    "allows_long": regime.allows_long,
-                    "position_size_cap": regime.position_size_cap,
+                    "allows_short": bool(regime.allows_short),
+                    "allows_long": bool(regime.allows_long),
+                    "position_size_cap": round(regime.position_size_cap, 2),
                     "warnings": regime.warnings
                 },
                 
                 "capitulation": {
-                    "is_capitulation": capitulation.is_capitulation,
+                    "is_capitulation": bool(capitulation.is_capitulation),
                     "status": capitulation.status,
-                    "confidence": capitulation.confidence,
+                    "confidence": round(capitulation.confidence, 2),
                     "criteria_met": capitulation.criteria_met,
                     "criteria_missing": capitulation.criteria_missing,
                     "details": {
-                        "rsi_extreme": capitulation.rsi_extreme,
-                        "volume_spike": capitulation.volume_spike,
-                        "gann_support_test": capitulation.gann_support_test,
-                        "bullish_divergence": capitulation.bullish_divergence,
-                        "weekly_rsi": capitulation.weekly_rsi,
-                        "volume_ratio": capitulation.volume_ratio
+                        "rsi_extreme": bool(capitulation.rsi_extreme),
+                        "volume_spike": bool(capitulation.volume_spike),
+                        "gann_support_test": bool(capitulation.gann_support_test),
+                        "bullish_divergence": bool(capitulation.bullish_divergence),
+                        "weekly_rsi": round(capitulation.weekly_rsi, 2),
+                        "volume_ratio": round(capitulation.volume_ratio, 2)
                     }
                 },
                 
@@ -980,6 +913,9 @@ class LuxorV7PranaSystem:
                     "position_size": trade_setups[0].get("position_size", 0)
                 }
             }
+            
+            # Final conversion to ensure no numpy types
+            return convert_numpy_types(result)
         
         except Exception as e:
             logger.error(f"[MTF] Error: {e}")
@@ -987,10 +923,6 @@ class LuxorV7PranaSystem:
             traceback.print_exc()
             return {"status": "error", "detail": str(e), "version": "5.0.6"}
     
-    # ========================================================
-    # LEGACY METHOD (backward compatibility)
-    # ========================================================
-    
     def get_daily_signal(self, df=None):
-        """Legacy method - now calls generate_mtf_signal."""
+        """Legacy method."""
         return self.generate_mtf_signal()
