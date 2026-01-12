@@ -1,4 +1,6 @@
-# LUXOR V7 PRANA - FastAPI v5.0.10
+# ============================================================
+# LUXOR V7 PRANA RUNTIME - FastAPI v5.1.0
+# ============================================================
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,12 +11,20 @@ import logging
 import traceback
 import sys
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
-VERSION = "5.0.10"
+VERSION = "5.1.0"
 
-app = FastAPI(title="LUXOR V7 PRANA", version=VERSION)
+app = FastAPI(
+    title="LUXOR V7 PRANA",
+    description="Multi-Timeframe Gann Trading System with Backtest Support",
+    version=VERSION
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 luxor_system = None
@@ -27,6 +37,7 @@ try:
 except Exception as e:
     import_error = str(e)
     logger.error(f"Import failed: {e}")
+    logger.error(traceback.format_exc())
 
 @app.exception_handler(Exception)
 async def handler(req, exc):
@@ -34,14 +45,24 @@ async def handler(req, exc):
 
 @app.get("/")
 async def root():
-    return {"name": "LUXOR V7 PRANA", "version": VERSION, "ready": luxor_system is not None}
+    return {
+        "name": "LUXOR V7 PRANA",
+        "version": VERSION,
+        "ready": luxor_system is not None,
+        "features": ["MTF Analysis", "Gann Levels", "Capitulation Detection", "Backtest Support"]
+    }
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy" if luxor_system else "degraded", "version": VERSION}
+    return {
+        "status": "healthy" if luxor_system else "degraded",
+        "version": VERSION,
+        "timestamp": datetime.now().isoformat()
+    }
 
 @app.get("/signal/daily")
 async def daily(symbol: str = Query(default="BTCUSDT")):
+    """Get daily MTF signal for live trading."""
     if not luxor_system:
         raise HTTPException(500, f"Not initialized: {import_error}")
     try:
@@ -52,10 +73,12 @@ async def daily(symbol: str = Query(default="BTCUSDT")):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error: {e}")
         raise HTTPException(500, str(e))
 
 @app.get("/signal/quick")
 async def quick(symbol: str = Query(default="BTCUSDT")):
+    """Quick signal check without full MTF analysis."""
     if not luxor_system:
         raise HTTPException(500, f"Not initialized: {import_error}")
     try:
@@ -66,7 +89,15 @@ async def quick(symbol: str = Query(default="BTCUSDT")):
         rsi = float(luxor_system.calculate_rsi(df['close']).iloc[-1])
         sma = float(df['close'].rolling(200).mean().iloc[-1]) if len(df) >= 200 else p
         d = "BULLISH" if p > sma and rsi > 50 else "BEARISH" if p < sma and rsi < 50 else "NEUTRAL"
-        return {"status": "success", "symbol": symbol, "price": round(p, 2), "direction": d, "rsi": round(rsi, 2), "sma_200": round(sma, 2)}
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "price": round(p, 2),
+            "direction": d,
+            "rsi": round(rsi, 2),
+            "sma_200": round(sma, 2),
+            "version": VERSION
+        }
     except Exception as e:
         raise HTTPException(500, str(e))
 
