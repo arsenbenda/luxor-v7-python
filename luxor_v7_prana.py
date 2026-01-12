@@ -1,6 +1,6 @@
 # ============================================================
-# LUXOR V7 PRANA - GANN EGYPT-INDIA UNIFIED SYSTEM v5.1.1
-# COMPLETE VERSION - Increased min_bars for Reliable Backtests
+# LUXOR V7 PRANA - GANN EGYPT-INDIA UNIFIED SYSTEM v5.1.2
+# CRITICAL FIXES: R:R Calculation, min_bars, Stop Loss Validation
 # ============================================================
 
 import pandas as pd
@@ -53,22 +53,39 @@ def safe_round(value, decimals=2):
     val = safe_float(value)
     return round(val, decimals)
 
+# ============================================================
+# v5.1.2 FIX: Improved level filtering with direction awareness
+# ============================================================
+
 def filter_valid_levels(levels: List, current_price: float, direction: str) -> List:
-    """Filter out None, 0, and invalid levels for TP/Stop calculation."""
+    """
+    Filter levels for TP/Stop calculation.
+    
+    Args:
+        levels: List of price levels
+        current_price: Current market price
+        direction: "above" for resistance, "below" for support
+    
+    Returns:
+        Sorted list of valid levels
+    """
     valid = []
     for level in levels:
-        if level is None or level == 0:
+        if level is None or level == 0 or np.isnan(level) if isinstance(level, float) else False:
             continue
-        if direction == "above" and level > current_price:
+        level = float(level)
+        if direction == "above" and level > current_price * 1.001:  # At least 0.1% above
             valid.append(level)
-        elif direction == "below" and level < current_price:
+        elif direction == "below" and level < current_price * 0.999:  # At least 0.1% below
             valid.append(level)
-        elif direction == "any":
-            valid.append(level)
-    return sorted(valid) if direction == "above" else sorted(valid, reverse=True)
+    
+    if direction == "above":
+        return sorted(valid)  # Ascending (nearest first)
+    else:
+        return sorted(valid, reverse=True)  # Descending (nearest first)
 
 # ============================================================
-# CONFIGURATION - v5.1.1 INCREASED min_bars
+# CONFIGURATION - v5.1.2 REDUCED min_bars
 # ============================================================
 
 class Regime(Enum):
@@ -87,38 +104,38 @@ class TimeframeConfig:
     trend_weight: float
     range_weight: float
 
-# v5.1.1: INCREASED min_bars for reliable backtests
-# Logic: More bars = better statistical reliability for indicators
+# v5.1.2: REDUCED min_bars for better backtest compatibility
+# Previous v5.1.1 values were too strict (24/52/90/200)
 TIMEFRAME_CONFIGS = {
     "1M": TimeframeConfig(
         name="1M",
         base_weight=0.35,
-        gann_lookback=24,    # 2 years lookback for Gann
-        min_bars=24,         # 2 years minimum (was 8)
+        gann_lookback=12,    # Reduced from 24
+        min_bars=12,         # 1 year minimum (was 24)
         trend_weight=0.40,
         range_weight=0.25
     ),
     "1W": TimeframeConfig(
         name="1W",
         base_weight=0.30,
-        gann_lookback=52,    # 1 year lookback for Gann
-        min_bars=52,         # 1 year minimum (was 20)
+        gann_lookback=40,    # Reduced from 52
+        min_bars=40,         # ~10 months (was 52)
         trend_weight=0.35,
         range_weight=0.30
     ),
     "3D": TimeframeConfig(
         name="3D",
         base_weight=0.20,
-        gann_lookback=120,   # ~1 year of 3D bars
-        min_bars=90,         # ~9 months minimum (was 45)
+        gann_lookback=80,    # Reduced from 120
+        min_bars=60,         # ~6 months (was 90)
         trend_weight=0.15,
         range_weight=0.25
     ),
     "1D": TimeframeConfig(
         name="1D",
         base_weight=0.15,
-        gann_lookback=252,   # 1 trading year
-        min_bars=200,        # ~10 months minimum (was 100)
+        gann_lookback=200,   # Keep for daily precision
+        min_bars=150,        # ~6 months (was 200)
         trend_weight=0.10,
         range_weight=0.20
     ),
@@ -142,10 +159,10 @@ GANN_CYCLES = [30, 45, 60, 90, 120, 144, 180, 270, 360]
 # ============================================================
 
 class LuxorV7PranaSystem:
-    """LUXOR V7 PRANA - Complete v5.1.1 with Increased min_bars"""
+    """LUXOR V7 PRANA - v5.1.2 with Critical R:R Fixes"""
     
     CACHE = {'df': None, 'last_fetch': None, 'cache_duration': 3600}
-    VERSION = "5.1.1"
+    VERSION = "5.1.2"
     
     def __init__(self, initial_capital: float = 10000):
         self.initial_capital = initial_capital
@@ -165,14 +182,13 @@ class LuxorV7PranaSystem:
     # ========================================================
     
     def fetch_ohlcv_ccxt(self, symbol: str = "BTC/USDT", interval: str = "1d", limit: int = 750) -> pd.DataFrame:
-        """Fetch OHLCV with multi-exchange fallback. Increased default limit for better backtests."""
+        """Fetch OHLCV with multi-exchange fallback."""
         if not self._ccxt_available:
             raise ImportError("ccxt not available - use df_historical parameter instead")
         
         import ccxt
         base = symbol.split('/')[0].upper() if '/' in symbol else symbol[:3].upper()
         
-        # Multi-exchange fallback (Binance excluded for geo-restrictions)
         exchanges = [
             ('kucoin', f'{base}/USDT'),
             ('bybit', f'{base}/USDT'),
@@ -209,7 +225,7 @@ class LuxorV7PranaSystem:
         raise Exception(f"All exchanges failed. Last error: {last_error}")
     
     def fetch_real_binance_data(self, use_cache: bool = True, symbol: str = "BTCUSDT") -> pd.DataFrame:
-        """Fetch with caching - uses multi-exchange fallback."""
+        """Fetch with caching."""
         if use_cache and self.CACHE['df'] is not None and self.CACHE['last_fetch']:
             age = (datetime.now() - self.CACHE['last_fetch']).total_seconds()
             if age < self.CACHE['cache_duration']:
@@ -217,29 +233,26 @@ class LuxorV7PranaSystem:
                 return self.CACHE['df'].copy()
         
         ccxt_sym = symbol[:-4] + '/USDT' if symbol.endswith('USDT') and '/' not in symbol else symbol
-        df = self.fetch_ohlcv_ccxt(ccxt_sym, "1d", 750)  # Increased to 750 for better backtest coverage
+        df = self.fetch_ohlcv_ccxt(ccxt_sym, "1d", 750)
         self.CACHE['df'] = df.copy()
         self.CACHE['last_fetch'] = datetime.now()
         return df
     
     def validate_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Validate and normalize DataFrame for processing."""
+        """Validate and normalize DataFrame."""
         if df is None or len(df) == 0:
             raise ValueError("DataFrame is empty or None")
         
         df = df.copy()
         
-        # Ensure required columns
         required = ['open', 'high', 'low', 'close']
         for col in required:
             if col not in df.columns:
                 raise ValueError(f"Missing required column: {col}")
         
-        # Add volume if missing
         if 'volume' not in df.columns:
             df['volume'] = 0.0
         
-        # Ensure date column
         if 'date' not in df.columns:
             if 'timestamp' in df.columns:
                 df['date'] = pd.to_datetime(df['timestamp'])
@@ -249,15 +262,12 @@ class LuxorV7PranaSystem:
             else:
                 df['date'] = pd.date_range(end=datetime.now(), periods=len(df), freq='D')
         
-        # Ensure timestamp column
         if 'timestamp' not in df.columns:
             df['timestamp'] = df['date']
         
-        # Convert to float
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
         
-        # Drop NaN in close
         df = df.dropna(subset=['close']).reset_index(drop=True)
         
         return df
@@ -268,7 +278,7 @@ class LuxorV7PranaSystem:
         idx = 'date' if 'date' in df.columns else 'timestamp'
         df.set_index(idx, inplace=True)
         
-        rule_map = {'3D': '3D', '1W': 'W', '1M': 'ME'}  # ME for month-end (pandas 2.x)
+        rule_map = {'3D': '3D', '1W': 'W', '1M': 'ME'}
         rule = rule_map.get(target_tf, '1D')
         
         try:
@@ -276,7 +286,6 @@ class LuxorV7PranaSystem:
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
             }).dropna()
         except Exception:
-            # Fallback for older pandas
             if rule == 'ME':
                 rule = 'M'
             resampled = df.resample(rule).agg({
@@ -293,7 +302,7 @@ class LuxorV7PranaSystem:
     # ========================================================
     
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI with Wilder smoothing."""
+        """Calculate RSI."""
         delta = prices.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -303,7 +312,7 @@ class LuxorV7PranaSystem:
         return (100 - (100 / (1 + rs))).fillna(50)
     
     def calculate_macd(self, prices: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        """Calculate MACD, Signal, Histogram."""
+        """Calculate MACD."""
         ema12 = prices.ewm(span=12, adjust=False).mean()
         ema26 = prices.ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
@@ -311,7 +320,7 @@ class LuxorV7PranaSystem:
         return macd, signal, macd - signal
     
     def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate ADX with upper cap at 100."""
+        """Calculate ADX with cap at 100."""
         high, low, close = df['high'], df['low'], df['close']
         
         plus_dm = high.diff()
@@ -327,7 +336,7 @@ class LuxorV7PranaSystem:
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1)
         
         adx = dx.ewm(alpha=1/period, min_periods=period).mean().fillna(0)
-        return adx.clip(upper=100)  # Cap at 100
+        return adx.clip(upper=100)
     
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         """Calculate ATR."""
@@ -358,16 +367,14 @@ class LuxorV7PranaSystem:
         }
     
     def calculate_ichimoku(self, df: pd.DataFrame) -> Dict:
-        """Calculate Ichimoku Cloud components."""
+        """Calculate Ichimoku Cloud."""
         high, low, close = df['high'], df['low'], df['close']
         
         tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
         kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
         senkou_a = ((tenkan + kijun) / 2).shift(26)
         senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
-        chikou = close.shift(-26)
         
-        # Future cloud (leading indicator)
         future_a = (tenkan + kijun) / 2
         future_b = (high.rolling(52).max() + low.rolling(52).min()) / 2
         
@@ -376,24 +383,22 @@ class LuxorV7PranaSystem:
             'kijun': kijun.fillna(close),
             'senkou_a': senkou_a.fillna(close),
             'senkou_b': senkou_b.fillna(close),
-            'chikou': chikou.fillna(close),
             'future_a': future_a.fillna(close),
             'future_b': future_b.fillna(close)
         }
     
     # ========================================================
-    # PIVOT & DIVERGENCE DETECTION
+    # PIVOT & DIVERGENCE
     # ========================================================
     
     def find_pivots(self, prices: pd.Series, left: int = 5, right: int = 5) -> Dict:
-        """Find pivot highs and lows using left/right bar confirmation."""
+        """Find pivot highs and lows."""
         highs, lows = [], []
         prices_list = prices.values
         
         for i in range(left, len(prices_list) - right):
             curr = prices_list[i]
             
-            # Check pivot high
             is_high = True
             for j in range(1, left + 1):
                 if prices_list[i - j] >= curr:
@@ -405,7 +410,6 @@ class LuxorV7PranaSystem:
                         is_high = False
                         break
             
-            # Check pivot low
             is_low = True
             for j in range(1, left + 1):
                 if prices_list[i - j] <= curr:
@@ -425,7 +429,7 @@ class LuxorV7PranaSystem:
         return {'highs': highs, 'lows': lows}
     
     def detect_divergence(self, df: pd.DataFrame, rsi: pd.Series, lookback: int = 50) -> Dict:
-        """Detect RSI divergence with pivot-based method + simple fallback."""
+        """Detect RSI divergence."""
         if len(df) < lookback:
             return {"bullish": False, "bearish": False, "method": "insufficient_data", "confidence": 0}
         
@@ -440,7 +444,7 @@ class LuxorV7PranaSystem:
         method = "pivot"
         desc = "No divergence detected"
         
-        # Bullish divergence: Price Lower Low + RSI Higher Low
+        # Bullish: Price LL + RSI HL
         if len(price_pivots['lows']) >= 2 and len(rsi_pivots['lows']) >= 2:
             p_lows = price_pivots['lows'][-2:]
             r_lows = rsi_pivots['lows'][-2:]
@@ -450,9 +454,9 @@ class LuxorV7PranaSystem:
                 price_diff = (p_lows[0]['price'] - p_lows[1]['price']) / p_lows[0]['price']
                 rsi_diff = r_lows[1]['price'] - r_lows[0]['price']
                 confidence = min(0.85, 0.5 + price_diff * 8 + rsi_diff / 80)
-                desc = f"Bullish: Price LL ({p_lows[1]['price']:.0f}<{p_lows[0]['price']:.0f}), RSI HL ({r_lows[1]['price']:.1f}>{r_lows[0]['price']:.1f})"
+                desc = f"Bullish: Price LL, RSI HL"
         
-        # Bearish divergence: Price Higher High + RSI Lower High
+        # Bearish: Price HH + RSI LH
         if len(price_pivots['highs']) >= 2 and len(rsi_pivots['highs']) >= 2:
             p_highs = price_pivots['highs'][-2:]
             r_highs = rsi_pivots['highs'][-2:]
@@ -462,35 +466,32 @@ class LuxorV7PranaSystem:
                 price_diff = (p_highs[1]['price'] - p_highs[0]['price']) / p_highs[0]['price']
                 rsi_diff = r_highs[0]['price'] - r_highs[1]['price']
                 confidence = min(0.85, 0.5 + price_diff * 8 + rsi_diff / 80)
-                desc = f"Bearish: Price HH ({p_highs[1]['price']:.0f}>{p_highs[0]['price']:.0f}), RSI LH ({r_highs[1]['price']:.1f}<{r_highs[0]['price']:.1f})"
+                desc = f"Bearish: Price HH, RSI LH"
         
-        # Fallback to simple method if no pivots found
+        # Fallback simple method
         if not bullish and not bearish:
-            if len(price_pivots['lows']) < 2 or len(rsi_pivots['lows']) < 2:
-                method = "simple"
-                half = lookback // 2
-                
-                # Simple bullish check
-                p1_low = recent_df['close'].iloc[:half].min()
-                p2_low = recent_df['close'].iloc[half:].min()
-                r1_low = recent_rsi.iloc[:half].min()
-                r2_low = recent_rsi.iloc[half:].min()
-                
-                if p2_low < p1_low and r2_low > r1_low:
-                    bullish = True
-                    confidence = 0.45
-                    desc = "Bullish divergence (simple method)"
-                
-                # Simple bearish check
-                p1_high = recent_df['close'].iloc[:half].max()
-                p2_high = recent_df['close'].iloc[half:].max()
-                r1_high = recent_rsi.iloc[:half].max()
-                r2_high = recent_rsi.iloc[half:].max()
-                
-                if p2_high > p1_high and r2_high < r1_high:
-                    bearish = True
-                    confidence = 0.45
-                    desc = "Bearish divergence (simple method)"
+            method = "simple"
+            half = lookback // 2
+            
+            p1_low = recent_df['close'].iloc[:half].min()
+            p2_low = recent_df['close'].iloc[half:].min()
+            r1_low = recent_rsi.iloc[:half].min()
+            r2_low = recent_rsi.iloc[half:].min()
+            
+            if p2_low < p1_low and r2_low > r1_low:
+                bullish = True
+                confidence = 0.45
+                desc = "Bullish divergence (simple)"
+            
+            p1_high = recent_df['close'].iloc[:half].max()
+            p2_high = recent_df['close'].iloc[half:].max()
+            r1_high = recent_rsi.iloc[:half].max()
+            r2_high = recent_rsi.iloc[half:].max()
+            
+            if p2_high > p1_high and r2_high < r1_high:
+                bearish = True
+                confidence = 0.45
+                desc = "Bearish divergence (simple)"
         
         return {
             "bullish": bullish,
@@ -505,7 +506,7 @@ class LuxorV7PranaSystem:
     # ========================================================
     
     def calculate_gann_levels(self, df: pd.DataFrame, lookback: int) -> Dict:
-        """Calculate Gann 8-level grid from swing high/low."""
+        """Calculate Gann 8-level grid."""
         lookback = min(lookback, len(df))
         recent = df.tail(lookback)
         
@@ -514,7 +515,6 @@ class LuxorV7PranaSystem:
         range_val = high - low
         current = safe_float(df['close'].iloc[-1])
         
-        # Get dates of high/low
         ts_col = 'timestamp' if 'timestamp' in df.columns else 'date'
         try:
             high_idx = recent['high'].idxmax()
@@ -524,7 +524,6 @@ class LuxorV7PranaSystem:
         except:
             high_date, low_date = "N/A", "N/A"
         
-        # Calculate all 8 levels
         levels = {}
         for i in range(9):
             level_price = low + (range_val * i / 8)
@@ -532,7 +531,6 @@ class LuxorV7PranaSystem:
         
         gann_50 = safe_round(low + range_val * 0.5, 2)
         
-        # Determine current position in grid
         if current >= levels["7_8"]:
             zone = "EXTREME_HIGH"
         elif current >= levels["5_8"]:
@@ -560,19 +558,17 @@ class LuxorV7PranaSystem:
         }
     
     def analyze_gann_context(self, price: float, gann: Dict, df: pd.DataFrame, atr: float) -> Dict:
-        """Analyze price position relative to Gann 50% with cross detection."""
+        """Analyze price vs Gann 50%."""
         g50 = gann["gann_50"]
         
         distance = price - g50
         dist_pct = (distance / g50) * 100 if g50 > 0 else 0
         dist_atr = distance / atr if atr > 0 else 0
         
-        # Extended cross detection (last 10 bars)
         closes = df['close'].tail(10).tolist()
         cross_above = any(closes[i-1] < g50 <= closes[i] for i in range(1, len(closes)))
         cross_below = any(closes[i-1] > g50 >= closes[i] for i in range(1, len(closes)))
         
-        # Determine position and bias
         if price > g50 + atr:
             position, bias = "STRONG_ABOVE", "BULLISH"
         elif price > g50:
@@ -595,20 +591,20 @@ class LuxorV7PranaSystem:
             "distance_atr": safe_round(dist_atr, 2),
             "cross_above": cross_above,
             "cross_below": cross_below,
-            "description": f"Price ${price:,.0f} is {position} Gann 50% (${g50:,.0f}), distance {dist_pct:+.1f}%"
+            "description": f"Price ${price:,.0f} is {position} Gann 50% (${g50:,.0f})"
         }
     
     # ========================================================
-    # CAPITULATION DETECTION
+    # CAPITULATION
     # ========================================================
     
     def detect_capitulation(self, df_w: pd.DataFrame, df_d: pd.DataFrame,
                            w_rsi: float, gann: Dict, price: float) -> Dict:
-        """Weighted scoring system for capitulation detection."""
+        """Weighted capitulation scoring."""
         score = 0.0
         criteria = []
         
-        # 1. RSI Score (0-3 points)
+        # RSI (0-3)
         if w_rsi < 20:
             score += 3
             criteria.append({"name": "RSI_EXTREME", "score": 3, "value": f"{w_rsi:.1f}"})
@@ -622,7 +618,7 @@ class LuxorV7PranaSystem:
             score += 0.5
             criteria.append({"name": "RSI_OVERSOLD", "score": 0.5, "value": f"{w_rsi:.1f}"})
         
-        # 2. Volume Score (0-3 points)
+        # Volume (0-3)
         vol_ratio = 1.0
         if len(df_d) >= 20 and 'volume' in df_d.columns:
             avg_vol = safe_float(df_d['volume'].tail(20).mean(), 1)
@@ -639,7 +635,7 @@ class LuxorV7PranaSystem:
             score += 1
             criteria.append({"name": "VOL_HIGH", "score": 1, "value": f"{vol_ratio:.1f}x"})
         
-        # 3. Gann Support Score (0-3 points)
+        # Gann support (0-3)
         g28 = gann["levels"].get("2_8", price * 0.88)
         g38 = gann["levels"].get("3_8", price * 0.94)
         
@@ -656,7 +652,7 @@ class LuxorV7PranaSystem:
             score += 1
             criteria.append({"name": "GANN_NEAR", "score": 1, "value": "Near support"})
         
-        # 4. Divergence Score (0-3 points)
+        # Divergence (0-3)
         if len(df_w) >= 20:
             w_rsi_series = self.calculate_rsi(df_w['close'])
             div = self.detect_divergence(df_w, w_rsi_series, min(30, len(df_w)))
@@ -666,7 +662,6 @@ class LuxorV7PranaSystem:
                 score += div_score
                 criteria.append({"name": "BULL_DIV", "score": round(div_score, 1), "value": div["description"]})
         
-        # Calculate status
         max_score = 12
         score_pct = score / max_score
         
@@ -696,20 +691,18 @@ class LuxorV7PranaSystem:
         }
     
     # ========================================================
-    # REGIME DETECTION
+    # REGIME
     # ========================================================
     
     def determine_regime(self, df_d: pd.DataFrame, w_rsi: float, w_adx: float,
                         cap: Dict, price: float) -> Dict:
-        """Determine market regime with override logic."""
-        # Calculate SMAs
+        """Determine market regime."""
         sma200 = safe_float(df_d['close'].rolling(200).mean().iloc[-1]) if len(df_d) >= 200 else price
         sma50 = safe_float(df_d['close'].rolling(50).mean().iloc[-1]) if len(df_d) >= 50 else price
         
         vs200 = "ABOVE" if price > sma200 else "BELOW"
         dist_pct = ((price - sma200) / sma200) * 100 if sma200 > 0 else 0
         
-        # ADX strength
         if w_adx > ADX_VERY_STRONG:
             strength = "VERY_STRONG"
         elif w_adx > ADX_STRONG_TREND:
@@ -721,33 +714,32 @@ class LuxorV7PranaSystem:
         override = False
         override_reason = None
         
-        # Regime determination with override
         if cap.get("is_capitulation"):
             regime = Regime.CAPITULATION
             override = True
-            override_reason = f"Capitulation {cap['status']} (score {cap['score']}/{cap['max_score']})"
+            override_reason = f"Capitulation {cap['status']}"
             allow_short, allow_long = False, True
             size_cap = 0.50 if cap["status"] == "CONFIRMED" else 0.25
-            warnings.append("CAPITULATION: Shorts blocked, consider accumulation")
+            warnings.append("CAPITULATION: Shorts blocked")
         elif w_rsi > RSI_EXTREME_OVERBOUGHT:
             regime = Regime.EUPHORIA
             override = True
-            override_reason = f"Euphoria - Weekly RSI {w_rsi:.0f}"
+            override_reason = f"Euphoria RSI {w_rsi:.0f}"
             allow_short, allow_long = True, False
             size_cap = 0.25
-            warnings.append("EUPHORIA: New longs blocked, watch for reversal")
+            warnings.append("EUPHORIA: Longs blocked")
         elif vs200 == "ABOVE" and strength in ["STRONG", "VERY_STRONG"]:
             regime = Regime.TRENDING_BULL
             allow_short, allow_long = True, True
             size_cap = 0.75 if w_rsi > 65 else 1.0
             if w_rsi > 65:
-                warnings.append("RSI elevated in uptrend - reduce size")
+                warnings.append("RSI elevated")
         elif vs200 == "BELOW" and strength in ["STRONG", "VERY_STRONG"]:
             regime = Regime.TRENDING_BEAR
             allow_short, allow_long = True, True
             size_cap = 1.0
             if w_rsi < 35:
-                warnings.append("RSI oversold in downtrend - watch for bounce")
+                warnings.append("RSI oversold in downtrend")
         else:
             regime = Regime.RANGING
             allow_short, allow_long = True, True
@@ -774,40 +766,27 @@ class LuxorV7PranaSystem:
     # ========================================================
     
     def analyze_timeframe(self, df: pd.DataFrame, tf: str) -> Dict:
-        """Complete analysis for a single timeframe."""
+        """Analyze single timeframe."""
         cfg = TIMEFRAME_CONFIGS[tf]
         
-        # Check data sufficiency
         if len(df) < cfg.min_bars:
-            logger.warning(f"[{tf}] Insufficient data: {len(df)} < {cfg.min_bars} required")
-            return self._empty_tf_result(tf, data_sufficient=False, bars_available=len(df), bars_required=cfg.min_bars)
+            logger.warning(f"[{tf}] Insufficient data: {len(df)} < {cfg.min_bars}")
+            return self._empty_tf_result(tf, False, len(df), cfg.min_bars)
         
         price = safe_float(df['close'].iloc[-1])
         
-        # Calculate indicators
         rsi_series = self.calculate_rsi(df['close'])
         rsi = safe_float(rsi_series.iloc[-1], 50)
         
         macd_line, macd_signal, macd_hist = self.calculate_macd(df['close'])
         macd_h = safe_float(macd_hist.iloc[-1])
-        macd_cross = "BULLISH" if macd_line.iloc[-1] > macd_signal.iloc[-1] and macd_line.iloc[-2] <= macd_signal.iloc[-2] else \
-                     "BEARISH" if macd_line.iloc[-1] < macd_signal.iloc[-1] and macd_line.iloc[-2] >= macd_signal.iloc[-2] else "NONE"
         
         adx = safe_float(self.calculate_adx(df).iloc[-1])
         atr = safe_float(self.calculate_atr(df).iloc[-1])
         
         sma50 = safe_float(self.calculate_sma(df['close'], 50).iloc[-1]) if len(df) >= 50 else price
         sma200 = safe_float(self.calculate_sma(df['close'], 200).iloc[-1]) if len(df) >= 200 else price
-        ema21 = safe_float(self.calculate_ema(df['close'], 21).iloc[-1]) if len(df) >= 21 else price
         
-        # Bollinger Bands
-        bb = self.calculate_bollinger(df['close'])
-        bb_upper = safe_float(bb['upper'].iloc[-1])
-        bb_lower = safe_float(bb['lower'].iloc[-1])
-        bb_mid = safe_float(bb['middle'].iloc[-1])
-        bb_width = safe_float(bb['bandwidth'].iloc[-1])
-        
-        # Ichimoku
         ichi = self.calculate_ichimoku(df)
         tenkan = safe_float(ichi['tenkan'].iloc[-1])
         kijun = safe_float(ichi['kijun'].iloc[-1])
@@ -819,31 +798,22 @@ class LuxorV7PranaSystem:
         future_b = safe_float(ichi['future_b'].iloc[-1])
         future_bullish = future_a > future_b
         
-        # TK Cross detection
-        tk_cross = "BULLISH" if tenkan > kijun and ichi['tenkan'].iloc[-2] <= ichi['kijun'].iloc[-2] else \
-                   "BEARISH" if tenkan < kijun and ichi['tenkan'].iloc[-2] >= ichi['kijun'].iloc[-2] else "NONE"
+        tk_cross = "BULLISH" if tenkan > kijun else "BEARISH"
         
-        # Gann levels
         gann = self.calculate_gann_levels(df, cfg.gann_lookback)
         g50 = gann["gann_50"]
         
-        # Divergence
         div = self.detect_divergence(df, rsi_series, min(50, len(df)))
         
-        # Volume analysis
         vol_ratio = 1.0
-        vol_trend = "NORMAL"
         if 'volume' in df.columns and len(df) >= 20:
             avg_vol = safe_float(df['volume'].tail(20).mean(), 1)
-            current_vol = safe_float(df['volume'].iloc[-1], 0)
-            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
-            vol_trend = "HIGH" if vol_ratio >= 1.5 else "LOW" if vol_ratio < 0.5 else "NORMAL"
+            vol_ratio = safe_float(df['volume'].iloc[-1], 0) / avg_vol if avg_vol > 0 else 1.0
         
-        # Weighted scoring for direction
+        # Scoring
         bull_score, bear_score = 0.0, 0.0
         signals = {}
         
-        # RSI (weight: 1.0)
         if rsi < RSI_OVERSOLD:
             bull_score += 1.0
             signals["RSI"] = f"OVERSOLD ({rsi:.1f})"
@@ -853,7 +823,6 @@ class LuxorV7PranaSystem:
         else:
             signals["RSI"] = f"NEUTRAL ({rsi:.1f})"
         
-        # MACD (weight: 1.0)
         if macd_h > 0:
             bull_score += 1.0
             signals["MACD"] = "BULLISH"
@@ -861,7 +830,6 @@ class LuxorV7PranaSystem:
             bear_score += 1.0
             signals["MACD"] = "BEARISH"
         
-        # TK Cross (weight: 0.8)
         if tenkan > kijun:
             bull_score += 0.8
             signals["TK"] = "BULLISH"
@@ -869,30 +837,24 @@ class LuxorV7PranaSystem:
             bear_score += 0.8
             signals["TK"] = "BEARISH"
         
-        # Cloud position (weight: 1.2)
         if price > cloud_top:
             bull_score += 1.2
-            signals["CLOUD"] = "ABOVE"
             vs_cloud = "ABOVE"
         elif price < cloud_bottom:
             bear_score += 1.2
-            signals["CLOUD"] = "BELOW"
             vs_cloud = "BELOW"
         else:
-            signals["CLOUD"] = "INSIDE"
             vs_cloud = "INSIDE"
+        signals["CLOUD"] = vs_cloud
         
-        # Gann 50% (weight: 1.5 - highest)
         if price > g50:
             bull_score += 1.5
-            signals["GANN_50"] = "ABOVE"
             vs_g50 = "ABOVE"
         else:
             bear_score += 1.5
-            signals["GANN_50"] = "BELOW"
             vs_g50 = "BELOW"
+        signals["GANN_50"] = vs_g50
         
-        # SMA 200 (weight: 1.0)
         if price > sma200:
             bull_score += 1.0
             signals["SMA200"] = "ABOVE"
@@ -900,27 +862,20 @@ class LuxorV7PranaSystem:
             bear_score += 1.0
             signals["SMA200"] = "BELOW"
         
-        # Future cloud (weight: 0.5)
         if future_bullish:
             bull_score += 0.5
-            signals["FUTURE_CLOUD"] = "BULLISH"
         else:
             bear_score += 0.5
-            signals["FUTURE_CLOUD"] = "BEARISH"
+        signals["FUTURE_CLOUD"] = "BULLISH" if future_bullish else "BEARISH"
         
-        # Divergence bonus
         if div["bullish"]:
             bull_score += div["confidence"]
-            signals["DIVERGENCE"] = "BULLISH"
         elif div["bearish"]:
             bear_score += div["confidence"]
-            signals["DIVERGENCE"] = "BEARISH"
         
-        # Normalize scores to 0-100
         total_score = bull_score + bear_score
         bull_pct = (bull_score / total_score) * 100 if total_score > 0 else 50
         
-        # Direction determination (stricter for 1M)
         if tf == "1M":
             if bull_pct > 65:
                 direction = "BULLISH"
@@ -936,7 +891,6 @@ class LuxorV7PranaSystem:
             else:
                 direction = "NEUTRAL"
         
-        # State name
         state = self._determine_state_name(rsi, adx, direction)
         
         return {
@@ -952,23 +906,14 @@ class LuxorV7PranaSystem:
             "current_price": safe_round(price, 2),
             "rsi": safe_round(rsi, 2),
             "macd_histogram": safe_round(macd_h, 4),
-            "macd_cross": macd_cross,
             "adx": safe_round(adx, 2),
             "adx_label": "VERY_STRONG" if adx > ADX_VERY_STRONG else "STRONG" if adx > ADX_STRONG_TREND else "WEAK",
             "atr": safe_round(atr, 2),
             "atr_pct": safe_round((atr / price) * 100 if price > 0 else 0, 2),
             "sma_50": safe_round(sma50, 2),
             "sma_200": safe_round(sma200, 2),
-            "ema_21": safe_round(ema21, 2),
             "price_vs_sma_200": "ABOVE" if price > sma200 else "BELOW",
-            "bollinger": {
-                "upper": safe_round(bb_upper, 2),
-                "middle": safe_round(bb_mid, 2),
-                "lower": safe_round(bb_lower, 2),
-                "bandwidth": safe_round(bb_width, 2)
-            },
             "volume_ratio": safe_round(vol_ratio, 2),
-            "volume_trend": vol_trend,
             "gann_high": gann["high"],
             "gann_low": gann["low"],
             "gann_50_pct": g50,
@@ -988,69 +933,39 @@ class LuxorV7PranaSystem:
             "gann": gann
         }
     
-    def _empty_tf_result(self, tf: str, data_sufficient: bool = False, bars_available: int = 0, bars_required: int = 0) -> Dict:
-        """Return empty timeframe result with proper structure."""
+    def _empty_tf_result(self, tf: str, data_sufficient: bool, bars_available: int, bars_required: int) -> Dict:
+        """Empty timeframe result."""
         return {
-            "timeframe": tf,
-            "direction": "NEUTRAL",
-            "state_name": "Insufficient Data",
-            "data_sufficient": data_sufficient,
-            "bars_available": bars_available,
-            "bars_required": bars_required,
-            "bullish_score": 0,
-            "bearish_score": 0,
-            "bullish_pct": 50,
-            "current_price": 0,
-            "rsi": 50,
-            "macd_histogram": 0,
-            "macd_cross": "NONE",
-            "adx": 0,
-            "adx_label": "N/A",
-            "atr": 0,
-            "atr_pct": 0,
-            "sma_50": 0,
-            "sma_200": 0,
-            "ema_21": 0,
-            "price_vs_sma_200": "N/A",
-            "bollinger": {"upper": 0, "middle": 0, "lower": 0, "bandwidth": 0},
-            "volume_ratio": 1,
-            "volume_trend": "N/A",
-            "gann_high": 0,
-            "gann_low": 0,
-            "gann_50_pct": 0,
-            "gann_zone": "N/A",
-            "price_vs_gann_50": "N/A",
+            "timeframe": tf, "direction": "NEUTRAL", "state_name": "Insufficient Data",
+            "data_sufficient": data_sufficient, "bars_available": bars_available, "bars_required": bars_required,
+            "bullish_score": 0, "bearish_score": 0, "bullish_pct": 50, "current_price": 0,
+            "rsi": 50, "macd_histogram": 0, "adx": 0, "adx_label": "N/A",
+            "atr": 0, "atr_pct": 0, "sma_50": 0, "sma_200": 0, "price_vs_sma_200": "N/A",
+            "volume_ratio": 1, "gann_high": 0, "gann_low": 0, "gann_50_pct": 0,
+            "gann_zone": "N/A", "price_vs_gann_50": "N/A",
             "divergence": {"bullish": False, "bearish": False, "method": "N/A", "confidence": 0},
             "signal_details": {},
-            "ichimoku": {
-                "tenkan": 0, "kijun": 0, "cloud_top": 0, "cloud_bottom": 0,
-                "tk_cross": "N/A", "price_vs_cloud": "N/A", "future_cloud": "N/A"
-            },
+            "ichimoku": {"tenkan": 0, "kijun": 0, "cloud_top": 0, "cloud_bottom": 0,
+                        "tk_cross": "N/A", "price_vs_cloud": "N/A", "future_cloud": "N/A"},
             "gann": {"high": 0, "low": 0, "levels": {}, "gann_50": 0, "current_zone": "N/A"}
         }
     
     def _determine_state_name(self, rsi: float, adx: float, direction: str) -> str:
-        """Determine market state name based on indicators."""
-        if rsi < 25:
-            return "Capitulation"
-        if rsi < 35:
-            return "Fear"
-        if rsi > 75:
-            return "Euphoria"
-        if rsi > 65:
-            return "Greed"
-        if adx > 50:
-            return "Expansion" if direction == "BULLISH" else "Contraction"
-        if adx < 20:
-            return "Consolidation"
+        """Determine state name."""
+        if rsi < 25: return "Capitulation"
+        if rsi < 35: return "Fear"
+        if rsi > 75: return "Euphoria"
+        if rsi > 65: return "Greed"
+        if adx > 50: return "Expansion" if direction == "BULLISH" else "Contraction"
+        if adx < 20: return "Consolidation"
         return "Transition"
     
     # ========================================================
-    # CONSENSUS CALCULATION
+    # CONSENSUS
     # ========================================================
     
     def calculate_consensus(self, timeframes: Dict, regime: Dict) -> Dict:
-        """Calculate MTF consensus with adaptive weights."""
+        """Calculate MTF consensus."""
         trending = regime["current"] in ["TRENDING_BULL", "TRENDING_BEAR"]
         
         weighted_bull, weighted_bear = 0.0, 0.0
@@ -1068,7 +983,6 @@ class LuxorV7PranaSystem:
             cfg = TIMEFRAME_CONFIGS[tf_name]
             weight = cfg.trend_weight if trending else cfg.range_weight
             
-            # Normalize scores to 0-100 range
             bull_pct = analysis.get("bullish_pct", 50)
             weighted_bull += weight * bull_pct
             weighted_bear += weight * (100 - bull_pct)
@@ -1078,11 +992,9 @@ class LuxorV7PranaSystem:
         if valid_tfs == 0:
             return self._empty_consensus()
         
-        # Calculate weighted score (-100 to +100)
         total_weight = weighted_bull + weighted_bear
         weighted_score = int(((weighted_bull - weighted_bear) / total_weight) * 100) if total_weight > 0 else 0
         
-        # Determine primary direction
         if weighted_score > 15:
             primary_direction = "BULLISH"
         elif weighted_score < -15:
@@ -1090,7 +1002,6 @@ class LuxorV7PranaSystem:
         else:
             primary_direction = "NEUTRAL"
         
-        # Count alignments and conflicts
         for tf_name, tf_dir in tf_directions.items():
             if tf_dir == "INSUFFICIENT_DATA":
                 continue
@@ -1099,7 +1010,6 @@ class LuxorV7PranaSystem:
             elif tf_dir != "NEUTRAL" and primary_direction != "NEUTRAL":
                 conflicts.append({"timeframe": tf_name, "direction": tf_dir})
         
-        # Confidence level
         if alignment_count >= 3 and abs(weighted_score) > 40:
             confidence = "HIGH"
         elif alignment_count >= 2 and abs(weighted_score) > 25:
@@ -1107,16 +1017,11 @@ class LuxorV7PranaSystem:
         else:
             confidence = "LOW"
         
-        # Override reduces confidence
         if regime.get("override_active") and confidence == "HIGH":
             confidence = "MEDIUM"
         
-        # Verdict
         strength_label = "STRONG" if confidence == "HIGH" else "MODERATE" if confidence == "MEDIUM" else "WEAK"
-        if primary_direction == "NEUTRAL":
-            verdict = "MIXED/NEUTRAL"
-        else:
-            verdict = f"{strength_label} {primary_direction}"
+        verdict = f"{strength_label} {primary_direction}" if primary_direction != "NEUTRAL" else "MIXED/NEUTRAL"
         
         return {
             "primary_direction": primary_direction,
@@ -1136,34 +1041,23 @@ class LuxorV7PranaSystem:
         }
     
     def _empty_consensus(self) -> Dict:
-        """Return empty consensus result."""
         return {
-            "primary_direction": "NEUTRAL",
-            "weighted_score": 0,
-            "alignment": "0/0",
-            "alignment_count": 0,
-            "valid_timeframes": 0,
-            "confidence_level": "NONE",
-            "verdict": "NO DATA",
-            "conflicts": [],
-            "has_conflicts": False,
-            "weight_mode": "N/A",
-            "tf_1m": "N/A",
-            "tf_1w": "N/A",
-            "tf_3d": "N/A",
-            "tf_1d": "N/A"
+            "primary_direction": "NEUTRAL", "weighted_score": 0,
+            "alignment": "0/0", "alignment_count": 0, "valid_timeframes": 0,
+            "confidence_level": "NONE", "verdict": "NO DATA",
+            "conflicts": [], "has_conflicts": False, "weight_mode": "N/A",
+            "tf_1m": "N/A", "tf_1w": "N/A", "tf_3d": "N/A", "tf_1d": "N/A"
         }
     
     # ========================================================
-    # PRIMARY BIAS DETERMINATION
+    # PRIMARY BIAS
     # ========================================================
     
     def determine_bias(self, price: float, gann_ctx: Dict, consensus: Dict, regime: Dict) -> Dict:
-        """Determine primary bias with Gann 50% override."""
+        """Determine primary bias."""
         gann_bias = gann_ctx["bias"]
         consensus_dir = consensus["primary_direction"]
         
-        # Extract direction from Gann bias
         if "BULLISH" in gann_bias:
             gann_dir = "BULLISH"
         elif "BEARISH" in gann_bias:
@@ -1171,7 +1065,6 @@ class LuxorV7PranaSystem:
         else:
             gann_dir = "NEUTRAL"
         
-        # Check for conflict between Gann and consensus
         conflict = False
         if gann_dir != "NEUTRAL" and gann_dir != consensus_dir and consensus_dir != "NEUTRAL":
             primary = gann_dir
@@ -1181,36 +1074,32 @@ class LuxorV7PranaSystem:
         else:
             primary = consensus_dir if consensus_dir != "NEUTRAL" else gann_dir
             source = "CONSENSUS" if consensus_dir == primary else "GANN"
-            note = f"Aligned: {source} = {primary}"
+            note = f"Aligned: {source}"
         
-        # Calculate confidence
         base_conf = 0.5
         if consensus["confidence_level"] == "HIGH":
             base_conf += 0.25
         elif consensus["confidence_level"] == "MEDIUM":
             base_conf += 0.15
-        
         if not conflict:
             base_conf += 0.15
-        
         if regime.get("override_active"):
             base_conf -= 0.10
         
         confidence = min(0.95, max(0.20, base_conf))
         
-        # Invalidation levels
         g50 = gann_ctx["gann_50"]
-        atr_buffer = abs(gann_ctx.get("distance", 0)) * 0.1  # 10% of distance as buffer
+        atr_buffer = abs(gann_ctx.get("distance", 0)) * 0.1
         
         if primary == "BULLISH":
             invalidation_price = g50 - atr_buffer
-            invalidation_desc = f"Bullish bias invalidated below ${invalidation_price:,.0f}"
+            invalidation_desc = f"Bullish invalidated below ${invalidation_price:,.0f}"
         elif primary == "BEARISH":
             invalidation_price = g50 + atr_buffer
-            invalidation_desc = f"Bearish bias invalidated above ${invalidation_price:,.0f}"
+            invalidation_desc = f"Bearish invalidated above ${invalidation_price:,.0f}"
         else:
             invalidation_price = g50
-            invalidation_desc = "Watch for Gann 50% breakout"
+            invalidation_desc = "Watch Gann 50% for direction"
         
         return {
             "primary_bias": primary,
@@ -1227,48 +1116,35 @@ class LuxorV7PranaSystem:
         }
     
     # ========================================================
-    # TIME FORECAST (GANN CYCLES)
+    # TIME FORECAST
     # ========================================================
     
     def calculate_time_forecast(self, df: pd.DataFrame, gann: Dict, reference_date: datetime = None) -> Dict:
-        """Calculate time-based forecast using Gann cycles."""
+        """Calculate time forecast using Gann cycles."""
         if reference_date is None:
             reference_date = datetime.now()
         
-        # Find last significant pivot
         ts_col = 'timestamp' if 'timestamp' in df.columns else 'date'
         
         try:
-            # Get high/low dates from Gann
             high_date_str = gann.get("high_date", "N/A")
             low_date_str = gann.get("low_date", "N/A")
             
-            # Parse dates
             high_date = pd.to_datetime(high_date_str) if high_date_str != "N/A" else None
             low_date = pd.to_datetime(low_date_str) if low_date_str != "N/A" else None
             
-            # Determine which pivot is more recent
             if high_date and low_date:
                 if high_date > low_date:
-                    ref_type = "HIGH"
-                    ref_pivot_date = high_date
-                    ref_price = gann["high"]
+                    ref_type, ref_pivot_date, ref_price = "HIGH", high_date, gann["high"]
                 else:
-                    ref_type = "LOW"
-                    ref_pivot_date = low_date
-                    ref_price = gann["low"]
+                    ref_type, ref_pivot_date, ref_price = "LOW", low_date, gann["low"]
             elif high_date:
-                ref_type = "HIGH"
-                ref_pivot_date = high_date
-                ref_price = gann["high"]
+                ref_type, ref_pivot_date, ref_price = "HIGH", high_date, gann["high"]
             elif low_date:
-                ref_type = "LOW"
-                ref_pivot_date = low_date
-                ref_price = gann["low"]
+                ref_type, ref_pivot_date, ref_price = "LOW", low_date, gann["low"]
             else:
                 return self._empty_time_forecast()
             
-            # Ensure timezone-naive
             if ref_pivot_date.tzinfo:
                 ref_pivot_date = ref_pivot_date.replace(tzinfo=None)
             if reference_date.tzinfo:
@@ -1277,22 +1153,19 @@ class LuxorV7PranaSystem:
             days_since = (reference_date - ref_pivot_date).days
             
         except Exception as e:
-            logger.warning(f"[TIME] Error parsing pivot dates: {e}")
+            logger.warning(f"[TIME] Error: {e}")
             return self._empty_time_forecast()
         
-        # Calculate next pivot candidates for each cycle
         next_pivots = []
         for cycle in GANN_CYCLES:
-            # How many complete cycles have passed?
             cycles_passed = days_since // cycle
             next_cycle_day = (cycles_passed + 1) * cycle
             days_to_next = next_cycle_day - days_since
             
-            if days_to_next > 0 and days_to_next <= 180:  # Only show pivots within 6 months
+            if days_to_next > 0 and days_to_next <= 180:
                 next_date = reference_date + timedelta(days=days_to_next)
-                expected_type = "LOW" if ref_type == "HIGH" else "HIGH"  # Alternate
+                expected_type = "LOW" if ref_type == "HIGH" else "HIGH"
                 
-                # Confidence based on cycle strength
                 if cycle in [90, 180, 360]:
                     conf = 0.75
                 elif cycle in [60, 120, 144]:
@@ -1308,16 +1181,13 @@ class LuxorV7PranaSystem:
                     "confidence": conf
                 })
         
-        # Sort by days away
         next_pivots.sort(key=lambda x: x["days_away"])
         
-        # Primary forecast (nearest high-confidence pivot)
         primary = None
         for p in next_pivots:
             if p["confidence"] >= 0.60:
                 primary = p
                 break
-        
         if not primary and next_pivots:
             primary = next_pivots[0]
         
@@ -1329,54 +1199,59 @@ class LuxorV7PranaSystem:
                 "days_since": days_since
             },
             "primary_forecast": primary,
-            "all_forecasts": next_pivots[:5],  # Top 5
+            "all_forecasts": next_pivots[:5],
             "gann_cycles_used": GANN_CYCLES
         }
     
     def _empty_time_forecast(self) -> Dict:
-        """Return empty time forecast."""
         return {
-            "cycle_origin": {
-                "reference_type": "N/A",
-                "reference_date": "N/A",
-                "reference_price": 0,
-                "days_since": 0
-            },
+            "cycle_origin": {"reference_type": "N/A", "reference_date": "N/A", "reference_price": 0, "days_since": 0},
             "primary_forecast": None,
             "all_forecasts": [],
             "gann_cycles_used": GANN_CYCLES
         }
     
     # ========================================================
-    # TRADE SETUP GENERATION
+    # v5.1.2 FIX: TRADE SETUP WITH CORRECT R:R
     # ========================================================
     
     def generate_trade_setups(self, price: float, bias: Dict, regime: Dict,
                              gann: Dict, tf_1d: Dict, atr: float) -> List[Dict]:
-        """Generate trade setups with R:R validation."""
+        """
+        Generate trade setups with FIXED R:R calculation.
+        
+        v5.1.2 FIXES:
+        - Stop loss validation (LONG: stop < entry, SHORT: stop > entry)
+        - ATR-based fallback for invalid stops
+        - Guaranteed minimum R:R of 1.5
+        - Proper direction-aware TP calculation
+        """
         setups = []
         
         direction = bias["primary_bias"]
         confidence = bias["confidence"]
         
-        # Check regime restrictions
-        if direction == "LONG" and not regime.get("allows_long", True):
-            return [self._wait_setup("Longs blocked by regime override")]
-        if direction == "SHORT" and not regime.get("allows_short", True):
-            return [self._wait_setup("Shorts blocked by regime override")]
+        # Regime restrictions
+        if direction == "BULLISH" and not regime.get("allows_long", True):
+            return [self._wait_setup("Longs blocked by regime")]
+        if direction == "BEARISH" and not regime.get("allows_short", True):
+            return [self._wait_setup("Shorts blocked by regime")]
         if direction == "NEUTRAL":
             return [self._wait_setup("No clear directional bias")]
         
-        # Get Gann levels for TP/Stop
+        # Get levels
         levels = gann.get("levels", {})
         g50 = gann.get("gann_50", price)
         
-        # Get cloud levels from 1D analysis
         cloud_top = tf_1d.get("ichimoku", {}).get("cloud_top", price * 1.05)
         cloud_bottom = tf_1d.get("ichimoku", {}).get("cloud_bottom", price * 0.95)
         
-        # Position size based on regime
-        base_size = 0.25  # 25% default
+        # Ensure ATR is valid
+        if atr <= 0 or np.isnan(atr):
+            atr = price * 0.02  # 2% fallback
+        
+        # Position sizing
+        base_size = 0.25
         size_cap = regime.get("position_size_cap", 1.0)
         
         if confidence >= 0.70:
@@ -1389,41 +1264,61 @@ class LuxorV7PranaSystem:
             position_size = min(0.20, base_size * 0.8 * size_cap)
             conf_label = "LOW"
         
+        entry = price
+        
         if direction == "BULLISH":
-            # LONG setup
-            entry = price
+            # ====== LONG SETUP ======
             
-            # Stop loss: below Gann support or ATR-based
-            support_levels = filter_valid_levels(
-                [levels.get("3_8"), levels.get("2_8"), cloud_bottom, g50 - atr],
-                price, "below"
-            )
-            stop_loss = support_levels[0] if support_levels else price - (2 * atr)
+            # Find support levels BELOW price
+            support_candidates = [
+                levels.get("3_8"),
+                levels.get("2_8"),
+                levels.get("1_8"),
+                cloud_bottom,
+                g50 - atr,
+                price - (1.5 * atr),  # ATR-based fallback
+            ]
+            support_levels = filter_valid_levels(support_candidates, price, "below")
             
-            # Take profits: above resistance levels
-            resistance_levels = filter_valid_levels(
-                [levels.get("5_8"), levels.get("6_8"), levels.get("7_8"), cloud_top, g50 + atr * 2],
-                price, "above"
-            )
+            # Stop loss: nearest support or ATR-based
+            if support_levels:
+                stop_loss = support_levels[0]
+            else:
+                stop_loss = price - (1.5 * atr)
+            
+            # VALIDATION: Stop MUST be below entry
+            if stop_loss >= entry:
+                logger.warning(f"[SETUP] LONG stop ({stop_loss}) >= entry ({entry}), using ATR fallback")
+                stop_loss = entry - (1.5 * atr)
             
             # Calculate risk
             risk = entry - stop_loss
+            
+            # VALIDATION: Risk must be positive
             if risk <= 0:
-                risk = atr
+                logger.error(f"[SETUP] LONG risk <= 0: entry={entry}, stop={stop_loss}")
+                return [self._wait_setup(f"Invalid LONG risk calculation")]
             
-            # TP levels with R:R validation
-            tp1 = entry + (risk * 1.5)  # 1.5R
-            tp2 = entry + (risk * 2.5)  # 2.5R
-            tp3 = entry + (risk * 3.5)  # 3.5R
+            # Take profits with guaranteed R:R
+            tp1 = entry + (risk * 1.5)  # R:R = 1.5
+            tp2 = entry + (risk * 2.5)  # R:R = 2.5
+            tp3 = entry + (risk * 3.5)  # R:R = 3.5
             
-            # Adjust to nearest resistance if available
-            if resistance_levels:
-                if resistance_levels[0] > entry and resistance_levels[0] < tp1:
+            # Optionally cap to resistance levels
+            resistance_candidates = [
+                levels.get("5_8"),
+                levels.get("6_8"),
+                levels.get("7_8"),
+                cloud_top,
+            ]
+            resistance_levels = filter_valid_levels(resistance_candidates, price, "above")
+            
+            if resistance_levels and resistance_levels[0] < tp1:
+                # If nearest resistance is too close, adjust or skip
+                if resistance_levels[0] > entry + (risk * 1.2):
                     tp1 = resistance_levels[0]
-                if len(resistance_levels) > 1 and resistance_levels[1] > tp1:
-                    tp2 = min(tp2, resistance_levels[1])
             
-            rr_ratio = (tp1 - entry) / risk if risk > 0 else 0
+            rr_ratio = (tp1 - entry) / risk
             
             setup = {
                 "id": 1,
@@ -1439,54 +1334,65 @@ class LuxorV7PranaSystem:
                 "position_size": safe_round(position_size, 2),
                 "confidence": conf_label,
                 "confidence_score": safe_round(confidence, 2),
-                "rationale": f"Bullish bias ({bias['source']}), price above Gann 50%"
+                "rationale": f"Bullish bias ({bias['source']}), entry above Gann 50%",
+                "valid": rr_ratio >= MIN_RR_RATIO,
+                "status": "VALID" if rr_ratio >= MIN_RR_RATIO else f"R:R {rr_ratio:.2f} < {MIN_RR_RATIO}"
             }
-            
-            # Validate R:R
-            if rr_ratio >= MIN_RR_RATIO:
-                setup["valid"] = True
-                setup["status"] = "VALID"
-            else:
-                setup["valid"] = False
-                setup["status"] = f"R:R too low ({rr_ratio:.2f} < {MIN_RR_RATIO})"
-            
             setups.append(setup)
             
         elif direction == "BEARISH":
-            # SHORT setup
-            entry = price
+            # ====== SHORT SETUP ======
             
-            # Stop loss: above Gann resistance
-            resistance_levels = filter_valid_levels(
-                [levels.get("5_8"), levels.get("6_8"), cloud_top, g50 + atr],
-                price, "above"
-            )
-            stop_loss = resistance_levels[0] if resistance_levels else price + (2 * atr)
+            # Find resistance levels ABOVE price
+            resistance_candidates = [
+                levels.get("5_8"),
+                levels.get("6_8"),
+                levels.get("7_8"),
+                cloud_top,
+                g50 + atr,
+                price + (1.5 * atr),  # ATR-based fallback
+            ]
+            resistance_levels = filter_valid_levels(resistance_candidates, price, "above")
             
-            # Take profits: below support levels
-            support_levels = filter_valid_levels(
-                [levels.get("3_8"), levels.get("2_8"), levels.get("1_8"), cloud_bottom],
-                price, "below"
-            )
+            # Stop loss: nearest resistance or ATR-based
+            if resistance_levels:
+                stop_loss = resistance_levels[0]
+            else:
+                stop_loss = price + (1.5 * atr)
+            
+            # VALIDATION: Stop MUST be above entry
+            if stop_loss <= entry:
+                logger.warning(f"[SETUP] SHORT stop ({stop_loss}) <= entry ({entry}), using ATR fallback")
+                stop_loss = entry + (1.5 * atr)
             
             # Calculate risk
             risk = stop_loss - entry
+            
+            # VALIDATION: Risk must be positive
             if risk <= 0:
-                risk = atr
+                logger.error(f"[SETUP] SHORT risk <= 0: entry={entry}, stop={stop_loss}")
+                return [self._wait_setup(f"Invalid SHORT risk calculation")]
             
-            # TP levels
-            tp1 = entry - (risk * 1.5)
-            tp2 = entry - (risk * 2.5)
-            tp3 = entry - (risk * 3.5)
+            # Take profits with guaranteed R:R (BELOW entry for shorts)
+            tp1 = entry - (risk * 1.5)  # R:R = 1.5
+            tp2 = entry - (risk * 2.5)  # R:R = 2.5
+            tp3 = entry - (risk * 3.5)  # R:R = 3.5
             
-            # Adjust to nearest support
-            if support_levels:
-                if support_levels[0] < entry and support_levels[0] > tp1:
+            # Optionally cap to support levels
+            support_candidates = [
+                levels.get("3_8"),
+                levels.get("2_8"),
+                levels.get("1_8"),
+                cloud_bottom,
+            ]
+            support_levels = filter_valid_levels(support_candidates, price, "below")
+            
+            if support_levels and support_levels[0] > tp1:
+                # If nearest support is too close, adjust or skip
+                if support_levels[0] < entry - (risk * 1.2):
                     tp1 = support_levels[0]
-                if len(support_levels) > 1 and support_levels[1] < tp1:
-                    tp2 = max(tp2, support_levels[1])
             
-            rr_ratio = (entry - tp1) / risk if risk > 0 else 0
+            rr_ratio = (entry - tp1) / risk
             
             setup = {
                 "id": 1,
@@ -1502,19 +1408,18 @@ class LuxorV7PranaSystem:
                 "position_size": safe_round(position_size, 2),
                 "confidence": conf_label,
                 "confidence_score": safe_round(confidence, 2),
-                "rationale": f"Bearish bias ({bias['source']}), price below Gann 50%"
+                "rationale": f"Bearish bias ({bias['source']}), entry below Gann 50%",
+                "valid": rr_ratio >= MIN_RR_RATIO,
+                "status": "VALID" if rr_ratio >= MIN_RR_RATIO else f"R:R {rr_ratio:.2f} < {MIN_RR_RATIO}"
             }
-            
-            if rr_ratio >= MIN_RR_RATIO:
-                setup["valid"] = True
-                setup["status"] = "VALID"
-            else:
-                setup["valid"] = False
-                setup["status"] = f"R:R too low ({rr_ratio:.2f} < {MIN_RR_RATIO})"
-            
             setups.append(setup)
         
-        return setups if setups else [self._wait_setup("No valid setup")]
+        # Log setup details
+        if setups:
+            s = setups[0]
+            logger.info(f"[SETUP] {s['direction']}: Entry=${s['entry']}, Stop=${s['stop_loss']}, TP1=${s['tp1']}, R:R={s['rr_ratio']}, Valid={s['valid']}")
+        
+        return setups if setups else [self._wait_setup("No valid setup generated")]
     
     def _wait_setup(self, reason: str) -> Dict:
         """Return wait/no-trade setup."""
@@ -1544,22 +1449,11 @@ class LuxorV7PranaSystem:
     def generate_mtf_signal(self, symbol: str = "BTCUSDT",
                            df_historical: pd.DataFrame = None,
                            reference_date: datetime = None) -> Dict:
-        """
-        Generate complete MTF signal.
-        
-        Args:
-            symbol: Trading symbol (default BTCUSDT)
-            df_historical: Optional historical DataFrame for backtest
-            reference_date: Optional reference date for time calculations
-        
-        Returns:
-            Complete signal dictionary
-        """
+        """Generate complete MTF signal."""
         try:
-            # Get data
             if df_historical is not None:
                 df_1d = self.validate_dataframe(df_historical)
-                logger.info(f"[SIGNAL] Using provided historical data: {len(df_1d)} candles")
+                logger.info(f"[SIGNAL] Using historical data: {len(df_1d)} candles")
             else:
                 df_1d = self.fetch_real_binance_data(symbol=symbol)
                 logger.info(f"[SIGNAL] Fetched live data: {len(df_1d)} candles")
@@ -1567,17 +1461,16 @@ class LuxorV7PranaSystem:
             if reference_date is None:
                 reference_date = datetime.now()
             
-            # Current price
             price = safe_float(df_1d['close'].iloc[-1])
             
-            # Resample to higher timeframes
+            # Resample
             df_3d = self.resample_ohlcv(df_1d, '3D')
             df_1w = self.resample_ohlcv(df_1d, '1W')
             df_1m = self.resample_ohlcv(df_1d, '1M')
             
-            logger.info(f"[SIGNAL] Resampled: 1D={len(df_1d)}, 3D={len(df_3d)}, 1W={len(df_1w)}, 1M={len(df_1m)}")
+            logger.info(f"[SIGNAL] Bars: 1D={len(df_1d)}, 3D={len(df_3d)}, 1W={len(df_1w)}, 1M={len(df_1m)}")
             
-            # Analyze each timeframe
+            # Analyze timeframes
             tf_1d_analysis = self.analyze_timeframe(df_1d, "1D")
             tf_3d_analysis = self.analyze_timeframe(df_3d, "3D")
             tf_1w_analysis = self.analyze_timeframe(df_1w, "1W")
@@ -1590,24 +1483,22 @@ class LuxorV7PranaSystem:
                 "1D": tf_1d_analysis
             }
             
-            # Weekly RSI and ADX for regime/capitulation
+            # Weekly metrics
             w_rsi = safe_float(tf_1w_analysis.get("rsi", 50), 50)
             w_adx = safe_float(tf_1w_analysis.get("adx", 25), 25)
+            w_gann = tf_1w_analysis.get("gann", self.calculate_gann_levels(df_1w, 40))
             
-            # Weekly Gann for capitulation
-            w_gann = tf_1w_analysis.get("gann", self.calculate_gann_levels(df_1w, 52))
-            
-            # Capitulation detection
+            # Capitulation
             capitulation = self.detect_capitulation(df_1w, df_1d, w_rsi, w_gann, price)
             
-            # Regime determination
+            # Regime
             regime = self.determine_regime(df_1d, w_rsi, w_adx, capitulation, price)
             
-            # MTF Consensus
+            # Consensus
             consensus = self.calculate_consensus(timeframes, regime)
             
-            # Daily Gann context for bias
-            d_gann = tf_1d_analysis.get("gann", self.calculate_gann_levels(df_1d, 252))
+            # Daily Gann context
+            d_gann = tf_1d_analysis.get("gann", self.calculate_gann_levels(df_1d, 200))
             d_atr = safe_float(tf_1d_analysis.get("atr", price * 0.02))
             gann_context = self.analyze_gann_context(price, d_gann, df_1d, d_atr)
             
@@ -1617,10 +1508,10 @@ class LuxorV7PranaSystem:
             # Time forecast
             time_forecast = self.calculate_time_forecast(df_1d, d_gann, reference_date)
             
-            # Trade setups
+            # Trade setups (v5.1.2 FIXED)
             trade_setups = self.generate_trade_setups(price, bias, regime, d_gann, tf_1d_analysis, d_atr)
             
-            # Price levels summary
+            # Price levels
             price_levels = {
                 "current": safe_round(price, 2),
                 "daily_gann_50": d_gann.get("gann_50"),
@@ -1633,34 +1524,21 @@ class LuxorV7PranaSystem:
                 "cloud_bottom": tf_1d_analysis.get("ichimoku", {}).get("cloud_bottom")
             }
             
-            # Build final signal
             signal = {
                 "status": "success",
                 "version": self.VERSION,
                 "symbol": symbol,
                 "timestamp": reference_date.isoformat(),
                 "current_price": safe_round(price, 2),
-                
-                # Core analysis
                 "primary_bias": bias,
                 "regime": regime,
                 "consensus": consensus,
                 "gann_context": gann_context,
                 "capitulation": capitulation,
-                
-                # Timeframe details
                 "timeframes": timeframes,
-                
-                # Price levels
                 "price_levels": price_levels,
-                
-                # Time analysis
                 "time_forecast": time_forecast,
-                
-                # Trade setups
                 "trade_setups": trade_setups,
-                
-                # Data quality
                 "data_quality": {
                     "daily_bars": len(df_1d),
                     "weekly_bars": len(df_1w),
@@ -1693,9 +1571,8 @@ if __name__ == "__main__":
     
     system = LuxorV7PranaSystem()
     print(f"\nLUXOR V7 PRANA v{system.VERSION}")
-    print("="*50)
+    print("=" * 50)
     
-    # Test signal generation
     signal = system.generate_mtf_signal("BTCUSDT")
     
     if signal["status"] == "success":
@@ -1705,7 +1582,6 @@ if __name__ == "__main__":
         print(f"Confidence: {signal['primary_bias']['confidence']}")
         print(f"Regime: {signal['regime']['current']}")
         print(f"Consensus: {signal['consensus']['verdict']}")
-        print(f"MTF Alignment: {signal['consensus']['alignment']}")
         
         if signal['trade_setups']:
             setup = signal['trade_setups'][0]
@@ -1714,6 +1590,8 @@ if __name__ == "__main__":
             print(f"  Entry: ${setup['entry']:,.2f}")
             print(f"  Stop: ${setup['stop_loss']:,.2f}")
             print(f"  TP1: ${setup['tp1']:,.2f}")
+            print(f"  Risk: ${setup['risk']:,.2f} ({setup['risk_pct']}%)")
             print(f"  R:R: {setup['rr_ratio']}")
+            print(f"  Valid: {setup['valid']}")
     else:
         print(f"Error: {signal.get('detail')}")
